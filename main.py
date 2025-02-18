@@ -577,7 +577,7 @@ with tabs[3]:
 
 with tabs[4]:
     st.header("Advanced Check")
-    st.markdown("Combines HTTP, DNS, WHOIS and TLS/SSL lookups into one comprehensive report. The DNS section now uses a full recursive resolution to show the complete CNAME chain and final records with detailed inheritance information.")
+    st.markdown("Combines HTTP, DNS, WHOIS, and TLS/SSL lookups into one comprehensive report.")
     with st.form("all_form"):
         domains_input_all = st.text_area("Enter one or more domains (one per line):", height=200)
         # Extra options for domain variant inclusion and wildcard check
