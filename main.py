@@ -669,7 +669,7 @@ with tabs[5]:
     with st.form("all_form"):
         domains_input_all = st.text_area("Enter one or more domains (one per line):", height=200)
         # Extra options for wildcard check
-        wildcard_enabled = st.checkbox("Check for wildcard DNS", value=False, key="check_wildcard")
+        wildcard_enabled = st.checkbox("Check for Wildcard DNS", value=False, key="check_wildcard")
         whois_enabled = st.checkbox("Enable WHOIS Lookup *(Slows Down Large Batches)*", value=False, key="all_whois_enabled")
         cert_enabled = st.checkbox("Enable TLS/SSL Certificate Check", value=False, key="all_cert_enabled")
         st.markdown("### Select DNS Record Types")
