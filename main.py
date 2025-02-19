@@ -604,14 +604,14 @@ with tabs[3]:
 
 with tabs[4]:
     st.header("Subdomain Finder")
-    st.write("This tool searches crt.sh for subdomains of a given domain and then performs HTTP checks to determine if they are online. Searches are dependent on crt.sh and sometimes may fail—try another domain if necessary.")
+    st.write("This tool searches crt.sh for subdomains of a given domain and then performs HTTP checks to determine if they are online. Searches are dependent on crt.sh and sometimes may fail.")
     domain_input = st.text_input("Enter a naked domain (e.g. example.com):")
     if st.button("Search") and domain_input:
         with st.spinner(text=f"Searching for subdomains of {domain_input}... This can take a few minutes."):
             try:
                 data = crtshAPI().search(domain_input)
                 if not data:
-                    st.error("No data returned from crt.sh. The domain may not have any certificate records or the API might be unavailable. (Try another domain and then try again)")
+                    st.error("No data returned from crt.sh. The domain may not have any certificate records or the API might be unavailable. (Try again or try another domain)")
                 else:
                     subdomains = set()
                     for entry in data:
