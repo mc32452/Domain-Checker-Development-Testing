@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import ssl
 import socket
 import datetime
+from crtsh import crtshAPI  # New import for the Subdomain Finder
 
 http_headers = {
     "User-Agent": (
@@ -263,19 +264,6 @@ async def check_wildcard_dns(domain, record_type="A"):
     except Exception:
         return "No"
 
-def expand_domains(domains, include_www_variant, include_naked_variant):
-    expanded = set()
-    for domain in domains:
-        d = domain.strip()
-        if not d:
-            continue
-        expanded.add(d)
-        if include_www_variant and not d.startswith("www."):
-            expanded.add("www." + d)
-        if include_naked_variant and d.startswith("www."):
-            expanded.add(d[4:])
-    return list(expanded)
-
 async def process_all_in_one(domain, timeout, retries, dns_record_types, whois_enabled, cert_enabled, wildcard_enabled, session, semaphore):
     result = {"Domain": domain}
     if whois_enabled:
@@ -427,10 +415,49 @@ async def run_all_in_one_checks(domains, timeout, concurrency, retries, dns_reco
             progress_bar.progress(int((completed / total) * 100))
     return results
 
+# --- New helper functions for Subdomain Finder ---
+
+async def check_subdomain(session, subdomain):
+    """
+    Asynchronously checks a single subdomain and records error details if any.
+    """
+    url = f"http://{subdomain}"
+    try:
+        async with session.get(url, timeout=3) as response:
+            if response.status < 400:
+                return {"Subdomain": subdomain, "Status": f"Live ({response.status})", "Error": ""}
+            else:
+                return {"Subdomain": subdomain, "Status": f"Down ({response.status})", "Error": f"HTTP Error {response.status}"}
+    except Exception as e:
+        return {"Subdomain": subdomain, "Status": "Down (Error)", "Error": str(e)}
+
+async def perform_http_checks(subdomain_list, progress_callback):
+    """
+    Performs asynchronous HTTP checks on a list of subdomains and updates progress.
+    """
+    results = []
+    async with aiohttp.ClientSession() as session:
+        tasks = [check_subdomain(session, sub) for sub in subdomain_list]
+        total = len(tasks)
+        for i, future in enumerate(asyncio.as_completed(tasks)):
+            result = await future
+            results.append(result)
+            progress_callback((i + 1) / total)
+    return results
+
+# --- Streamlit App Layout ---
+
 st.set_page_config(page_title="Domain Checker", layout="wide")
 st.title("Domain Checker")
 
-tabs = st.tabs(["HTTP Check", "DNS Lookup", "WHOIS Check", "TLS/SSL Certificate Check", "Advanced Check"])
+tabs = st.tabs([
+    "HTTP Check", 
+    "DNS Lookup", 
+    "WHOIS Check", 
+    "TLS/SSL Certificate Check", 
+    "Subdomain Finder",   # New tab added before Advanced Check
+    "Advanced Check"
+])
 
 with tabs[0]:
     st.header("HTTP Check")
@@ -576,13 +603,72 @@ with tabs[3]:
         st.write("### TLS/SSL Certificate Check Results", st.session_state["cert_df"])
 
 with tabs[4]:
+    st.header("Subdomain Finder")
+    st.write("This tool searches crt.sh for subdomains of a given domain and then performs HTTP checks to determine if they are online. Searches are dependent on crt.sh and sometimes may fail—try another domain if necessary.")
+    domain_input = st.text_input("Enter a naked domain (e.g. example.com):")
+    if st.button("Search") and domain_input:
+        with st.spinner(text=f"Searching for subdomains of {domain_input}... This can take a while."):
+            try:
+                data = crtshAPI().search(domain_input)
+                if not data:
+                    st.error("No data returned from crt.sh. The domain may not have any certificate records or the API might be unavailable. (Try another domain and then try again)")
+                else:
+                    subdomains = set()
+                    for entry in data:
+                        names = entry.get("name_value", "").splitlines()
+                        for sub in names:
+                            sub = sub.strip()
+                            if sub.endswith(domain_input):
+                                subdomains.add(sub)
+                    subdomain_list = list(subdomains)
+                    st.write(f"Found {len(subdomain_list)} unique subdomains.")
+                    
+                    progress_bar = st.progress(0)
+                    def update_progress(value):
+                        progress_bar.progress(value)
+                    
+                    results = asyncio.run(perform_http_checks(subdomain_list, update_progress))
+                    
+                    online_results = [{"Subdomain": res["Subdomain"], "Status": res["Status"]} 
+                                      for res in results if "Live" in res["Status"]]
+                    offline_results = [res for res in results if "Down" in res["Status"]]
+                    
+                    st.subheader("Online Subdomains")
+                    if online_results:
+                        df_online = pd.DataFrame(online_results)
+                        st.write(df_online)
+                        csv_online = df_online.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            label="Download Online CSV",
+                            data=csv_online,
+                            file_name="online_subdomains.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.write("No online subdomains found.")
+                    
+                    st.subheader("Offline Subdomains")
+                    if offline_results:
+                        df_offline = pd.DataFrame(offline_results)
+                        st.write(df_offline)
+                        csv_offline = df_offline.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            label="Download Offline CSV",
+                            data=csv_offline,
+                            file_name="offline_subdomains.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.write("No offline subdomains found.")
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+
+with tabs[5]:
     st.header("Advanced Check")
     st.markdown("Combines HTTP, DNS, WHOIS, and TLS/SSL lookups into one comprehensive report.")
     with st.form("all_form"):
         domains_input_all = st.text_area("Enter one or more domains (one per line):", height=200)
-        # Extra options for domain variant inclusion and wildcard check
-        include_www_variant = st.checkbox("Include www variant for naked domains", value=False, key="include_www")
-        include_naked_variant = st.checkbox("Include naked domain for www domains", value=False, key="include_naked")
+        # Extra options for wildcard check
         wildcard_enabled = st.checkbox("Check for wildcard DNS", value=False, key="check_wildcard")
         whois_enabled = st.checkbox("Enable WHOIS Lookup *(Slows Down Large Batches)*", value=False, key="all_whois_enabled")
         cert_enabled = st.checkbox("Enable TLS/SSL Certificate Check", value=False, key="all_cert_enabled")
@@ -602,9 +688,7 @@ with tabs[4]:
         if not domains_input_all.strip():
             st.error("Please enter at least one domain.")
         else:
-            # Expand domain list according to variant checkboxes
-            input_domains = [line.strip() for line in domains_input_all.splitlines() if line.strip()]
-            domains_all = expand_domains(input_domains, include_www_variant, include_naked_variant)
+            domains_all = [line.strip() for line in domains_input_all.splitlines() if line.strip()]
             enabled_checks = "HTTP"
             if whois_enabled:
                 enabled_checks += ", WHOIS"
