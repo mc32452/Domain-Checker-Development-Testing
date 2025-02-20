@@ -11,9 +11,11 @@ from urllib.parse import urlparse
 import ssl
 import socket
 import datetime
-from crtsh import crtshAPI  # New import for the Subdomain Finder
+from crtsh import crtshAPI  # For Subdomain Finder
+from typing import List, Tuple, Dict, Any, Optional, Callable, Union
 
-http_headers = {
+# Define HTTP headers for requests
+http_headers: Dict[str, str] = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -23,15 +25,26 @@ http_headers = {
     "Accept-Language": "en-US,en;q=0.5"
 }
 
-WHOIS_CACHE = {}
+# Global cache for WHOIS lookups
+WHOIS_CACHE: Dict[str, Dict[str, Any]] = {}
 
-def get_whois_info(domain):
+def get_whois_info(domain: str) -> Dict[str, Any]:
+    """
+    Retrieves WHOIS information for the specified domain.
+
+    Args:
+        domain (str): The domain to look up.
+
+    Returns:
+        Dict[str, Any]: A dictionary containing registrar, creation/expiration dates, name servers,
+                        and any error message encountered.
+    """
     global WHOIS_CACHE
     if domain in WHOIS_CACHE:
         return WHOIS_CACHE[domain]
     time.sleep(0.2)
-    max_attempts = 3
-    backoff_factor = 0.5
+    max_attempts: int = 3
+    backoff_factor: float = 0.5
     for attempt in range(max_attempts):
         try:
             if attempt > 0:
@@ -47,7 +60,7 @@ def get_whois_info(domain):
                 creation_date = creation_date[0]
             if isinstance(expiration_date, list):
                 expiration_date = expiration_date[0]
-            result = {
+            result: Dict[str, Any] = {
                 "registrar": registrar,
                 "creation_date": creation_date,
                 "expiration_date": expiration_date,
@@ -65,7 +78,16 @@ def get_whois_info(domain):
                 WHOIS_CACHE[domain] = result
                 return result
 
-async def process_whois_domain(domain):
+async def process_whois_domain(domain: str) -> Tuple[str, Any, Any, Any, str, str]:
+    """
+    Asynchronously retrieves WHOIS information for a given domain.
+
+    Args:
+        domain (str): The domain to process.
+
+    Returns:
+        Tuple containing the domain, registrar, creation date, expiration date, name servers, and any error.
+    """
     info = await asyncio.to_thread(get_whois_info, domain)
     return (
         domain,
@@ -76,9 +98,18 @@ async def process_whois_domain(domain):
         info.get("error", "")
     )
 
-async def run_whois_checks(domains):
+async def run_whois_checks(domains: List[str]) -> List[Tuple[str, Any, Any, Any, str, str]]:
+    """
+    Runs WHOIS lookups for a list of domains asynchronously.
+
+    Args:
+        domains (List[str]): List of domains.
+
+    Returns:
+        List of tuples with WHOIS lookup results.
+    """
     tasks = [process_whois_domain(domain) for domain in domains]
-    results = []
+    results: List[Tuple[str, Any, Any, Any, str, str]] = []
     total = len(tasks)
     progress_bar = st.progress(0)
     for i, coro in enumerate(asyncio.as_completed(tasks), start=1):
@@ -87,19 +118,36 @@ async def run_whois_checks(domains):
         progress_bar.progress(int((i / total) * 100))
     return results
 
-async def check_http_domain(domain, timeout, retries, session, headers, semaphore):
+async def check_http_domain(domain: str, timeout: int, retries: int, session: aiohttp.ClientSession, headers: Dict[str, str], semaphore: asyncio.Semaphore) -> Tuple[Any, ...]:
+    """
+    Checks the HTTP response for a given domain.
+
+    Args:
+        domain (str): The domain to check.
+        timeout (int): Request timeout in seconds.
+        retries (int): Number of retry attempts.
+        session (aiohttp.ClientSession): The aiohttp session for making requests.
+        headers (Dict[str, str]): HTTP headers.
+        semaphore (asyncio.Semaphore): Semaphore to control concurrency.
+
+    Returns:
+        Tuple with domain, status code, response snippet, response time, attempts count,
+        whether a response was received, redirect history, and if redirection occurred.
+    """
     url = "http://" + domain if not domain.startswith(("http://", "https://")) else domain
     attempt = 0
     error_message = ""
-    response_time = None
+    response_time: Optional[float] = None
     redirect_info = ""
     redirected = "No"
     start_time = time.perf_counter()
-    def normalize_url(url):
-        parsed = urlparse(url)
+
+    def normalize_url(url_str: str) -> Tuple[str, str, str]:
+        parsed = urlparse(url_str)
         netloc = parsed.netloc.lower().lstrip("www.")
         path = parsed.path.rstrip("/") or "/"
         return netloc, path, parsed.query
+
     while attempt < retries:
         attempt += 1
         try:
@@ -127,8 +175,20 @@ async def check_http_domain(domain, timeout, retries, session, headers, semaphor
     snippet = f"Error occurred: {error_message}"
     return (domain, None, snippet, round(response_time, 2), attempt, "No", "No redirect", "No")
 
-async def run_http_checks(domains, timeout, concurrency, retries):
-    results = []
+async def run_http_checks(domains: List[str], timeout: int, concurrency: int, retries: int) -> List[Tuple[Any, ...]]:
+    """
+    Runs HTTP checks for a list of domains asynchronously.
+
+    Args:
+        domains (List[str]): List of domains.
+        timeout (int): Timeout in seconds.
+        concurrency (int): Maximum number of concurrent HTTP requests.
+        retries (int): Number of retries per domain.
+
+    Returns:
+        List of tuples with HTTP check results.
+    """
+    results: List[Tuple[Any, ...]] = []
     semaphore = asyncio.Semaphore(concurrency)
     async with aiohttp.ClientSession() as session:
         tasks = [check_http_domain(domain, timeout, retries, session, http_headers, semaphore) for domain in domains]
@@ -142,15 +202,25 @@ async def run_http_checks(domains, timeout, concurrency, retries):
             progress_bar.progress(int((completed / total) * 100))
     return results
 
-async def get_dns_record_for_domain(domain, record_types):
+async def get_dns_record_for_domain(domain: str, record_types: List[str]) -> Tuple[str, Dict[str, Union[List[str], str]]]:
+    """
+    Performs DNS record lookups for the specified domain and record types.
+
+    Args:
+        domain (str): Domain to look up.
+        record_types (List[str]): List of DNS record types (e.g., A, AAAA, MX).
+
+    Returns:
+        Tuple containing the domain and a dictionary of record types to their results.
+    """
     if not domain or '.' not in domain:
         return domain, {rtype: "Invalid domain format" for rtype in record_types}
-    records = {}
+    records: Dict[str, Union[List[str], str]] = {}
     resolver = dns.asyncresolver.Resolver()
     resolver.timeout = 5
     resolver.lifetime = 5
     resolver.nameservers = ['8.8.8.8', '1.1.1.1']
-    cname_result = None
+    cname_result: Optional[List[str]] = None
     try:
         cname_answer = await resolver.resolve(domain, "CNAME")
         cname_result = [rdata.to_text() for rdata in cname_answer]
@@ -158,6 +228,7 @@ async def get_dns_record_for_domain(domain, record_types):
         cname_result = None
     except Exception:
         cname_result = None
+
     for rtype in record_types:
         try:
             if rtype in ["A", "AAAA"]:
@@ -172,10 +243,10 @@ async def get_dns_record_for_domain(domain, record_types):
                 records[rtype] = record_list if record_list else "No records found"
             elif rtype == "MX":
                 answer = await resolver.resolve(domain, rtype)
-                mx_records = []
+                mx_records: List[str] = []
                 for rdata in answer:
                     target = str(rdata.exchange).rstrip('.')
-                    mx_cname = None
+                    mx_cname: Optional[List[str]] = None
                     try:
                         mx_cname_answer = await resolver.resolve(target, "CNAME")
                         mx_cname = [rd.to_text() for rd in mx_cname_answer]
@@ -202,8 +273,20 @@ async def get_dns_record_for_domain(domain, record_types):
         records["CNAME_Inheritance"] = "Inherited from CNAME"
     return domain, records
 
-async def run_dns_checks(domains, record_types, progress_callback=None):
-    results = {}
+async def run_dns_checks(domains: List[str], record_types: List[str],
+                         progress_callback: Optional[Callable[[int, int], None]]) -> Dict[str, Any]:
+    """
+    Runs DNS lookups for multiple domains asynchronously.
+
+    Args:
+        domains (List[str]): List of domains.
+        record_types (List[str]): DNS record types to query.
+        progress_callback (Optional[Callable[[int, int], None]]): Function to update progress.
+
+    Returns:
+        Dictionary mapping each domain to its DNS record results.
+    """
+    results: Dict[str, Any] = {}
     tasks = [get_dns_record_for_domain(domain, record_types) for domain in domains]
     total = len(tasks)
     completed = 0
@@ -215,9 +298,25 @@ async def run_dns_checks(domains, record_types, progress_callback=None):
             progress_callback(completed, total)
     return results
 
-def get_certificate_info(domain):
+def get_certificate_info(domain: str) -> Tuple[Optional[str], Optional[int], str]:
+    """
+    Retrieves TLS/SSL certificate information for the given domain.
+
+    This function establishes an SSL connection with SNI support.
+    If the certificate is obtained, the function returns its expiry date and the number of days until expiry.
+
+    Args:
+        domain (str): The domain to check.
+
+    Returns:
+        Tuple containing:
+            - Certificate expiry date as a string (or None if error),
+            - Days until expiry as an integer (or None if error),
+            - Error message (empty string if no error).
+    """
     try:
         context = ssl.create_default_context()
+        # Removed CRL checking to avoid the CERTIFICATE_VERIFY_FAILED error.
         with socket.create_connection((domain, 443), timeout=10) as sock:
             with context.wrap_socket(sock, server_hostname=domain) as ssock:
                 cert = ssock.getpeercert()
@@ -231,17 +330,48 @@ def get_certificate_info(domain):
     except Exception as e:
         return None, None, str(e)
 
-async def process_certificate_check(domain):
+async def process_certificate_check(domain: str) -> Tuple[Optional[str], Optional[int], str]:
+    """
+    Asynchronously obtains TLS/SSL certificate information for a given domain.
+
+    Args:
+        domain (str): The domain to check.
+
+    Returns:
+        Tuple with certificate expiry date, days until expiry, and any error message.
+    """
     return await asyncio.to_thread(get_certificate_info, domain)
 
-async def process_cert_domain(domain):
-    cert_expiry_date, days_until_expiry, cert_error = await process_certificate_check(domain)
-    return (domain, cert_expiry_date if cert_expiry_date else "", 
-            days_until_expiry if days_until_expiry is not None else "", cert_error)
+async def process_cert_domain(domain: str) -> Tuple[str, str, str, str]:
+    """
+    Processes certificate check for a domain and returns a tuple of results.
 
-async def run_certificate_checks(domains):
+    Args:
+        domain (str): The domain to process.
+
+    Returns:
+        Tuple containing domain, certificate expiry date, days until expiry, and error message.
+    """
+    cert_expiry_date, days_until_expiry, cert_error = await process_certificate_check(domain)
+    return (
+        domain,
+        cert_expiry_date if cert_expiry_date else "",
+        str(days_until_expiry) if days_until_expiry is not None else "",
+        cert_error
+    )
+
+async def run_certificate_checks(domains: List[str]) -> List[Tuple[str, str, str, str]]:
+    """
+    Runs TLS/SSL certificate checks for a list of domains asynchronously.
+
+    Args:
+        domains (List[str]): List of domains.
+
+    Returns:
+        List of tuples with certificate check results.
+    """
     tasks = [process_cert_domain(domain) for domain in domains]
-    results = []
+    results: List[Tuple[str, str, str, str]] = []
     total = len(tasks)
     progress_bar = st.progress(0)
     for i, task in enumerate(asyncio.as_completed(tasks), start=1):
@@ -250,12 +380,22 @@ async def run_certificate_checks(domains):
         progress_bar.progress(int((i / total) * 100))
     return results
 
-async def check_wildcard_dns(domain, record_type="A"):
+async def check_wildcard_dns(domain: str, record_type: str = "A") -> str:
+    """
+    Checks if a domain supports wildcard DNS by querying a randomized subdomain.
+
+    Args:
+        domain (str): The domain to check.
+        record_type (str): DNS record type to query (default is "A").
+
+    Returns:
+        "Yes" if wildcard DNS is detected, "No" otherwise.
+    """
     resolver = dns.asyncresolver.Resolver()
     resolver.timeout = 5
     resolver.lifetime = 5
     resolver.nameservers = ['8.8.8.8', '1.1.1.1']
-    random_sub = "wildcardtest" + str(int(time.time()*1000)) + "." + domain
+    random_sub = "wildcardtest" + str(int(time.time() * 1000)) + "." + domain
     try:
         await resolver.resolve(random_sub, record_type)
         return "Yes"
@@ -264,8 +404,35 @@ async def check_wildcard_dns(domain, record_type="A"):
     except Exception:
         return "No"
 
-async def process_all_in_one(domain, timeout, retries, dns_record_types, whois_enabled, cert_enabled, wildcard_enabled, session, semaphore):
-    result = {"Domain": domain}
+async def process_all_in_one(
+    domain: str,
+    timeout: int,
+    retries: int,
+    dns_record_types: List[str],
+    whois_enabled: bool,
+    cert_enabled: bool,
+    wildcard_enabled: bool,
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore
+) -> Dict[str, Any]:
+    """
+    Performs a comprehensive set of checks (HTTP, WHOIS, DNS, TLS/SSL, wildcard) for a domain.
+
+    Args:
+        domain (str): The domain to check.
+        timeout (int): HTTP timeout.
+        retries (int): Number of HTTP retries.
+        dns_record_types (List[str]): DNS record types to check.
+        whois_enabled (bool): Whether to perform WHOIS lookup.
+        cert_enabled (bool): Whether to perform TLS/SSL certificate check.
+        wildcard_enabled (bool): Whether to check for wildcard DNS.
+        session (aiohttp.ClientSession): The aiohttp session for HTTP checks.
+        semaphore (asyncio.Semaphore): Semaphore to control concurrency.
+
+    Returns:
+        Dictionary with the combined results from all checks.
+    """
+    result: Dict[str, Any] = {"Domain": domain}
     if whois_enabled:
         whois_info = await asyncio.to_thread(get_whois_info, domain)
         result["Registrar"] = whois_info.get("registrar", "")
@@ -302,20 +469,30 @@ async def process_all_in_one(domain, timeout, retries, dns_record_types, whois_e
         result["Wildcard DNS"] = wildcard
     return result
 
-async def get_recursive_dns_chain(domain, record_types):
+async def get_recursive_dns_chain(domain: str, record_types: List[str]) -> str:
+    """
+    Generates a recursive DNS resolution chain for a domain.
+
+    Args:
+        domain (str): The domain to resolve.
+        record_types (List[str]): DNS record types to include in the chain.
+
+    Returns:
+        A formatted string representing the recursive DNS chain.
+    """
     resolver = dns.asyncresolver.Resolver()
     resolver.timeout = 5
     resolver.lifetime = 5
     resolver.nameservers = ['8.8.8.8', '1.1.1.1']
-    output_lines = []
+    output_lines: List[str] = []
     output_lines.append(f"DNS Resolution for {domain}")
     output_lines.append("    ")
     if "A" in record_types or "AAAA" in record_types:
         output_lines.append("A/AAAA Resolution:")
-        chain_lines = []
+        chain_lines: List[str] = []
         current = domain
         chain_lines.append(f"Start Domain: {current}")
-        last_cname = None
+        last_cname: Optional[str] = None
         while True:
             try:
                 cname_answer = await resolver.resolve(current, "CNAME")
@@ -358,7 +535,7 @@ async def get_recursive_dns_chain(domain, record_types):
             for rdata in mx_answer:
                 priority = rdata.preference
                 target = str(rdata.exchange).rstrip('.')
-                mx_chain = [f"Priority {priority}: {target}"]
+                mx_chain: List[str] = [f"Priority {priority}: {target}"]
                 last_mx = target
                 current_mx = target
                 while True:
@@ -397,8 +574,33 @@ async def get_recursive_dns_chain(domain, record_types):
             output_lines.append("")
     return "\n".join(output_lines)
 
-async def run_all_in_one_checks(domains, timeout, concurrency, retries, dns_record_types, whois_enabled, cert_enabled, wildcard_enabled):
-    results = []
+async def run_all_in_one_checks(
+    domains: List[str],
+    timeout: int,
+    concurrency: int,
+    retries: int,
+    dns_record_types: List[str],
+    whois_enabled: bool,
+    cert_enabled: bool,
+    wildcard_enabled: bool
+) -> List[Dict[str, Any]]:
+    """
+    Runs a comprehensive set of checks (HTTP, DNS, WHOIS, TLS/SSL, wildcard) on a list of domains.
+
+    Args:
+        domains (List[str]): List of domains.
+        timeout (int): HTTP timeout.
+        concurrency (int): Maximum number of concurrent HTTP requests.
+        retries (int): HTTP retries.
+        dns_record_types (List[str]): DNS record types to check.
+        whois_enabled (bool): Whether to perform WHOIS lookup.
+        cert_enabled (bool): Whether to perform TLS/SSL certificate check.
+        wildcard_enabled (bool): Whether to check for wildcard DNS.
+
+    Returns:
+        List of dictionaries with combined check results.
+    """
+    results: List[Dict[str, Any]] = []
     semaphore = asyncio.Semaphore(concurrency)
     async with aiohttp.ClientSession() as session:
         tasks = [
@@ -417,9 +619,16 @@ async def run_all_in_one_checks(domains, timeout, concurrency, retries, dns_reco
 
 # --- New helper functions for Subdomain Finder ---
 
-async def check_subdomain(session, subdomain):
+async def check_subdomain(session: aiohttp.ClientSession, subdomain: str) -> Dict[str, str]:
     """
-    Asynchronously checks a single subdomain and records error details if any.
+    Asynchronously checks if a given subdomain is live via an HTTP request.
+
+    Args:
+        session (aiohttp.ClientSession): The HTTP session.
+        subdomain (str): The subdomain to check.
+
+    Returns:
+        Dictionary containing the subdomain, its status, and any error encountered.
     """
     url = f"http://{subdomain}"
     try:
@@ -431,11 +640,18 @@ async def check_subdomain(session, subdomain):
     except Exception as e:
         return {"Subdomain": subdomain, "Status": "Down (Error)", "Error": str(e)}
 
-async def perform_http_checks(subdomain_list, progress_callback):
+async def perform_http_checks(subdomain_list: List[str], progress_callback: Callable[[float], None]) -> List[Dict[str, str]]:
     """
-    Performs asynchronous HTTP checks on a list of subdomains and updates progress.
+    Performs HTTP checks on a list of subdomains asynchronously.
+
+    Args:
+        subdomain_list (List[str]): List of subdomains.
+        progress_callback (Callable[[float], None]): Function to update progress (value between 0 and 1).
+
+    Returns:
+        List of dictionaries with subdomain check results.
     """
-    results = []
+    results: List[Dict[str, str]] = []
     async with aiohttp.ClientSession() as session:
         tasks = [check_subdomain(session, sub) for sub in subdomain_list]
         total = len(tasks)
@@ -455,24 +671,25 @@ tabs = st.tabs([
     "DNS Lookup", 
     "WHOIS Check", 
     "TLS/SSL Certificate Check", 
-    "Subdomain Finder",   # New tab added before Advanced Check
+    "Subdomain Finder", 
     "Advanced Check"
 ])
 
 with tabs[0]:
     st.header("HTTP Check")
-    st.markdown("Retrieve the HTTP status code, a snippet of the response, response time, and redirection details. Use this to verify website availability and performance.")
+    st.markdown("Retrieve HTTP status code, response snippet, response time, and redirection details to verify website availability and performance.")
     with st.form("http_form"):
-        domains_input_http = st.text_area("Enter one or more domains (one per line):", height=200)
-        timeout = st.number_input("Timeout (seconds)", min_value=1, value=10, step=1)
-        concurrency = st.number_input("Concurrency", min_value=1, value=20, step=1)
-        retries = st.number_input("Retries", min_value=1, value=3, step=1)
+        domains_input_http: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
+        timeout: int = st.number_input("Timeout (seconds)", min_value=1, value=10, step=1, help="Maximum time to wait for a response.")
+        concurrency: int = st.number_input("Concurrency", min_value=1, value=20, step=1, help="Number of simultaneous HTTP requests.")
+        retries: int = st.number_input("Retries", min_value=1, value=3, step=1, help="Number of retry attempts per domain.")
         submit_http = st.form_submit_button("Run HTTP Check")
+        
     if submit_http:
         if not domains_input_http.strip():
             st.error("Please enter at least one domain.")
         else:
-            domains_http = [line.strip() for line in domains_input_http.splitlines() if line.strip()]
+            domains_http: List[str] = [line.strip() for line in domains_input_http.splitlines() if line.strip()]
             st.info("Starting HTTP checks...")
             http_results = asyncio.run(run_http_checks(domains_http, timeout, concurrency, retries))
             df_http = pd.DataFrame(
@@ -490,35 +707,35 @@ with tabs[0]:
 
 with tabs[1]:
     st.header("DNS Lookup")
-    st.markdown("Performs DNS record lookups for the specified domains using a non-recursive search. Select one or more DNS record types (e.g., A, AAAA, MX) to retrieve detailed DNS information for each domain.")
+    st.markdown("Perform DNS record lookups for specified domains using non-recursive searches. Select one or more DNS record types to retrieve detailed information.")
     with st.form("dns_form"):
-        domains_input_dns = st.text_area("Enter one or more domains (one per line):", height=150, help="Example: example.com")
+        domains_input_dns: str = st.text_area("Enter one or more domains (one per line):", height=150, help="Example: example.com")
         st.markdown("### Select DNS Record Types")
-        record_options = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
-        selected_record_types = []
+        record_options: List[str] = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
+        selected_record_types: List[str] = []
         cols = st.columns(4)
         for i, rtype in enumerate(record_options):
             col = cols[i % 4]
             if col.checkbox(rtype, value=True, key=f"checkbox_{rtype}"):
                 selected_record_types.append(rtype)
         submit_dns = st.form_submit_button("Lookup DNS Records")
+        
     if submit_dns:
         if not domains_input_dns.strip():
             st.error("Please enter at least one domain.")
         elif not selected_record_types:
             st.error("Please select at least one DNS record type.")
         else:
-            domains_dns = [line.strip() for line in domains_input_dns.splitlines() if line.strip()]
+            domains_dns: List[str] = [line.strip() for line in domains_input_dns.splitlines() if line.strip()]
             total_domains = len(domains_dns)
             st.write(f"Processing **{total_domains}** domain(s)...")
             progress_bar = st.progress(0)
-            def progress_callback(completed, total):
+            def progress_callback(completed: int, total: int) -> None:
                 progress_bar.progress(int((completed / total) * 100))
             start_time = time.time()
             dns_results = asyncio.run(run_dns_checks(domains_dns, selected_record_types, progress_callback))
             end_time = time.time()
             elapsed_time = end_time - start_time
-            domains_per_second = total_domains / elapsed_time if elapsed_time > 0 else 0
             csv_output = io.StringIO()
             csv_writer = csv.writer(csv_output)
             header = ["Domain"] + selected_record_types
@@ -540,7 +757,7 @@ with tabs[1]:
             csv_data = csv_output.getvalue()
             st.subheader("Statistics")
             st.write(f"**Time Taken:** {elapsed_time:.2f} seconds")
-            st.write(f"**Processing Speed:** {domains_per_second:.2f} domains/second")
+            st.write(f"**Processing Speed:** {total_domains / elapsed_time:.2f} domains/second")
             st.download_button("Download Table as CSV", data=csv_data,
                                file_name=f"DNS_Lookup_Results_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv")
             st.subheader("DNS Results")
@@ -552,15 +769,16 @@ with tabs[1]:
 
 with tabs[2]:
     st.header("WHOIS Check")
-    st.markdown("Retrieves domain registration details: Registrar, creation date, expiration date, and name servers.")
+    st.markdown("Retrieve domain registration details including Registrar, creation date, expiration date, and name servers.")
     with st.form("whois_form"):
-        domains_input = st.text_area("Enter one or more domains (one per line):", height=200)
+        domains_input: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
         submit_whois = st.form_submit_button("Run WHOIS Check")
+        
     if submit_whois:
         if not domains_input.strip():
             st.error("Please enter at least one domain.")
         else:
-            domains = [line.strip() for line in domains_input.splitlines() if line.strip()]
+            domains: List[str] = [line.strip() for line in domains_input.splitlines() if line.strip()]
             st.info("Starting WHOIS lookups...")
             whois_results = asyncio.run(run_whois_checks(domains))
             df_whois = pd.DataFrame(
@@ -578,15 +796,16 @@ with tabs[2]:
 
 with tabs[3]:
     st.header("TLS/SSL Certificate Check")
-    st.markdown("Performs a TLS/SSL certificate check for each domain. This check returns the certificate expiry date, calculates the number of days until expiry, and reports any errors encountered.")
+    st.markdown("Perform a TLS/SSL certificate check for each domain. This check returns the certificate expiry date, the number of days until expiry, and any errors encountered.")
     with st.form("cert_form"):
-        domains_input_cert = st.text_area("Enter one or more domains (one per line):", height=200)
+        domains_input_cert: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
         submit_cert = st.form_submit_button("Run TLS/SSL Certificate Check")
+        
     if submit_cert:
         if not domains_input_cert.strip():
             st.error("Please enter at least one domain.")
         else:
-            domains_cert = [line.strip() for line in domains_input_cert.splitlines() if line.strip()]
+            domains_cert: List[str] = [line.strip() for line in domains_input_cert.splitlines() if line.strip()]
             st.info("Starting TLS/SSL Certificate Check...")
             cert_results = asyncio.run(run_certificate_checks(domains_cert))
             df_cert = pd.DataFrame(
@@ -604,8 +823,8 @@ with tabs[3]:
 
 with tabs[4]:
     st.header("Subdomain Finder")
-    st.write("This tool searches crt.sh for subdomains of a given domain and then performs HTTP checks to determine if they are online. Searches are dependent on crt.sh and sometimes may fail.")
-    domain_input = st.text_input("Enter a naked domain (e.g. example.com):")
+    st.write("Search crt.sh for subdomains of a given domain and perform HTTP checks to determine if they are online.")
+    domain_input: str = st.text_input("Enter a naked domain (e.g. example.com):", help="Do not include www or subdomains.")
     if st.button("Search") and domain_input:
         with st.spinner(text=f"Searching for subdomains of {domain_input}... This can take a few minutes."):
             try:
@@ -620,19 +839,19 @@ with tabs[4]:
                             sub = sub.strip()
                             if sub.endswith(domain_input):
                                 subdomains.add(sub)
-                    subdomain_list = list(subdomains)
+                    subdomain_list: List[str] = list(subdomains)
                     st.write(f"Found {len(subdomain_list)} unique subdomains.")
-                    
+
                     progress_bar = st.progress(0)
-                    def update_progress(value):
+                    def update_progress(value: float) -> None:
                         progress_bar.progress(value)
-                    
+
                     results = asyncio.run(perform_http_checks(subdomain_list, update_progress))
-                    
+
                     online_results = [{"Subdomain": res["Subdomain"], "Status": res["Status"]} 
                                       for res in results if "Live" in res["Status"]]
                     offline_results = [res for res in results if "Down" in res["Status"]]
-                    
+
                     st.subheader("Online Subdomains")
                     if online_results:
                         df_online = pd.DataFrame(online_results)
@@ -646,7 +865,7 @@ with tabs[4]:
                         )
                     else:
                         st.write("No online subdomains found.")
-                    
+
                     st.subheader("Offline Subdomains")
                     if offline_results:
                         df_offline = pd.DataFrame(offline_results)
@@ -665,30 +884,31 @@ with tabs[4]:
 
 with tabs[5]:
     st.header("Advanced Check")
-    st.markdown("Combines HTTP, DNS, WHOIS, and TLS/SSL lookups into one comprehensive report.")
+    st.markdown("Combine HTTP, DNS, WHOIS, and TLS/SSL lookups into one comprehensive report.")
     with st.form("all_form"):
-        domains_input_all = st.text_area("Enter one or more domains (one per line):", height=200)
-        # Extra options for wildcard check
-        wildcard_enabled = st.checkbox("Check for Wildcard DNS", value=False, key="check_wildcard")
-        whois_enabled = st.checkbox("Enable WHOIS Lookup *(Slows Down Large Batches)*", value=False, key="all_whois_enabled")
-        cert_enabled = st.checkbox("Enable TLS/SSL Certificate Check", value=False, key="all_cert_enabled")
+        domains_input_all: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
+        # Extra options for wildcard check and enabling WHOIS/TLS lookups
+        wildcard_enabled: bool = st.checkbox("Check for Wildcard DNS", value=False, key="check_wildcard")
+        whois_enabled: bool = st.checkbox("Enable WHOIS Lookup *(Slows Down Large Batches)*", value=False, key="all_whois_enabled")
+        cert_enabled: bool = st.checkbox("Enable TLS/SSL Certificate Check", value=False, key="all_cert_enabled")
         st.markdown("### Select DNS Record Types")
-        record_options_all = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
-        selected_dns_all = []
+        record_options_all: List[str] = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
+        selected_dns_all: List[str] = []
         cols = st.columns(4)
         for i, rtype in enumerate(record_options_all):
             col = cols[i % 4]
             if col.checkbox(rtype, value=True, key=f"all_checkbox_{rtype}"):
                 selected_dns_all.append(rtype)      
-        timeout_all = st.number_input("HTTP Timeout (seconds)", min_value=1, value=10, step=1)
-        concurrency_all = st.number_input("HTTP Concurrency", min_value=1, value=20, step=1)
-        retries_all = st.number_input("HTTP Retries", min_value=1, value=3, step=1)
+        timeout_all: int = st.number_input("HTTP Timeout (seconds)", min_value=1, value=10, step=1, help="Max time (in seconds) for HTTP requests.")
+        concurrency_all: int = st.number_input("HTTP Concurrency", min_value=1, value=20, step=1, help="Number of simultaneous HTTP requests.")
+        retries_all: int = st.number_input("HTTP Retries", min_value=1, value=3, step=1, help="Number of retry attempts per domain.")
         submit_all = st.form_submit_button("Run Advanced Check")
+        
     if submit_all:
         if not domains_input_all.strip():
             st.error("Please enter at least one domain.")
         else:
-            domains_all = [line.strip() for line in domains_input_all.splitlines() if line.strip()]
+            domains_all: List[str] = [line.strip() for line in domains_input_all.splitlines() if line.strip()]
             enabled_checks = "HTTP"
             if whois_enabled:
                 enabled_checks += ", WHOIS"
@@ -706,7 +926,7 @@ with tabs[5]:
             end_time_all = time.time()
             elapsed_all = end_time_all - start_time_all
             st.write(f"**Total Time Taken:** {elapsed_all:.2f} seconds")
-            columns = ["Domain", "HTTP Status"]
+            columns: List[str] = ["Domain", "HTTP Status"]
             if cert_enabled:
                 columns.extend(["Certificate Expiry Date", "Days Until Expiry"])
             if selected_dns_all:
