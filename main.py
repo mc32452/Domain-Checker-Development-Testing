@@ -824,7 +824,7 @@ with tabs[3]:
 with tabs[4]:
     st.header("Subdomain Finder")
     st.write("Searches crt.sh for subdomains of a given domain and perform HTTP checks to determine if they are online.")
-    st.write("*If the search fails, try again or try another domain*")
+    st.caption("If the search fails, try again or try another domain")
     domain_input: str = st.text_input("Enter a naked domain (e.g. example.com):", help="Do not include www or subdomains.")
     if st.button("Search") and domain_input:
         with st.spinner(text=f"Searching for subdomains of {domain_input}... This can take a few minutes."):
