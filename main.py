@@ -576,7 +576,7 @@ with tabs[0]:
 # DNS Lookup Tab
 with tabs[1]:
     st.header("DNS Lookup")
-    st.markdown("Perform DNS record lookups for specified domains using non-recursive searches. Select one or more DNS record types to retrieve detailed information.")
+    st.markdown("Perform DNS record lookups for specified domain(s). Use advanced search for recursive DNS lookups.")
     with st.form("dns_form"):
         domains_input_dns: str = st.text_area("Enter one or more domains (one per line):", height=150, help="Example: example.com")
         st.markdown("### Select DNS Record Types")
@@ -669,7 +669,7 @@ with tabs[2]:
 # TLS/SSL Certificate Check Tab
 with tabs[3]:
     st.header("TLS/SSL Certificate Check")
-    st.markdown("Perform a TLS/SSL certificate check for each domain. This check returns the certificate expiry date, the number of days until expiry, and any errors encountered.")
+    st.markdown("Perform a TLS/SSL certificate check for each domain. This check returns the certificate expiry date and the number of days until expiry.")
     with st.form("cert_form"):
         domains_input_cert: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
         submit_cert = st.form_submit_button("Run TLS/SSL Certificate Check")
@@ -698,7 +698,7 @@ with tabs[3]:
 # Subdomain Finder Tab
 with tabs[4]:
     st.header("Subdomain Finder")
-    st.write("Search crt.sh for subdomains of a given domain and perform advanced HTTP checks to determine if they are online, including redirect information.")
+    st.write("Search crt.sh for subdomains of a given domain and perform HTTP checks to determine if they are online.")
     domain_input: str = st.text_input("Enter a naked domain (e.g. example.com):", help="Do not include www or subdomains.")
     # Add Ctrl+Enter shortcut using a JavaScript snippet.
     import streamlit.components.v1 as components
