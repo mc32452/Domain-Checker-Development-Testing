@@ -872,7 +872,7 @@ with tabs[5]:
     with st.form("all_form"):
         domains_input_all: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
         wildcard_enabled: bool = st.checkbox("Check for Wildcard DNS", value=False, key="check_wildcard")
-        whois_enabled: bool = st.checkbox("Enable WHOIS Lookup *(Slows Down Large Batches)*", value=False, key="all_whois_enabled")
+        whois_enabled: bool = st.checkbox("Enable WHOIS Lookup", value=False, key="all_whois_enabled")
         cert_enabled: bool = st.checkbox("Enable TLS/SSL Certificate Check", value=False, key="all_cert_enabled")
         st.markdown("### Select DNS Record Types")
         record_options_all: List[str] = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
