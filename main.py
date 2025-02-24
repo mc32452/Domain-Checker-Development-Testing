@@ -748,7 +748,7 @@ with tabs[3]:
 # Subdomain Finder Tab
 with tabs[4]:
     st.header("Subdomain Finder")
-    st.write("Search crt.sh for subdomains of a given domain and perform HTTP checks to determine if they are online.")
+    st.write("Search for subdomains of a given domain and perform HTTP checks to determine if they are online.")
     domain_input: str = st.text_input("Enter a naked domain (e.g. example.com):", help="Do not include www or subdomains.")
     import streamlit.components.v1 as components
     components.html(
