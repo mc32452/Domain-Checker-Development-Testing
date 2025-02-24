@@ -12,6 +12,7 @@ import datetime
 from urllib.parse import urlparse
 from crtsh import crtshAPI  # For Subdomain Finder
 from typing import List, Tuple, Dict, Any, Optional, Callable, Union
+import whois  # Added for fallback WHOIS lookup
 
 # ------------------------------
 # Global Variables and Headers
@@ -34,7 +35,7 @@ async def get_whois_info(domain: str, session: aiohttp.ClientSession) -> dict:
     Retrieves WHOIS information for the specified domain using the endpoint:
       https://rdap.ports.domains/domain/{domain}
     Then it parses the JSON response into a simplified format.
-
+    
     Extracted fields:
       - Creation Date: from events with eventAction "registration" or "created"
       - Last Updated: from events with eventAction "last updated" or "updated"
@@ -42,95 +43,110 @@ async def get_whois_info(domain: str, session: aiohttp.ClientSession) -> dict:
       - Nameservers: list of nameservers
       - Registrant: from the entity with role "registrant" (with handle, organization, and kind)
       - Registrar: from the entity with role "registrar" (with name, IANA ID, and URL)
-
-    If no registrant info is found, defaults to "Not Available".
+    
+    If no registrant info is found using the primary method, falls back to python-whois.
     """
     rdap_url = f"https://rdap.ports.domains/domain/{domain}"
+    fallback_used = False
+    rdap_error = ""
     try:
         async with session.get(rdap_url, timeout=10) as response:
             if response.status != 200:
-                return {
-                    "registrant": "Not Available",
-                    "registrar": "",
-                    "creation_date": "",
-                    "expiration_date": "",
-                    "updated_date": "",
-                    "name_servers": "",
-                    "error": f"HTTP error {response.status}"
-                }
-            data = await response.json()
+                rdap_error = f"HTTP error {response.status}"
+                rdap_data = None
+            else:
+                rdap_data = await response.json()
     except Exception as e:
-        return {
-            "registrant": "Not Available",
-            "registrar": "",
-            "creation_date": "",
-            "expiration_date": "",
-            "updated_date": "",
-            "name_servers": "",
-            "error": str(e)
-        }
+        rdap_data = None
+        rdap_error = str(e)
 
-    # Parse dates from "events"
+    # Initialize default values
+    registrant_str = "Not Available"
+    registrar_str = ""
     creation_date = ""
     expiration_date = ""
     updated_date = ""
-    if "events" in data:
-        for event in data["events"]:
-            action = event.get("eventAction", "").lower()
-            if action in ["registration", "created"] and not creation_date:
-                creation_date = event.get("eventDate", "")
-            elif action in ["last updated", "updated"] and not updated_date:
-                updated_date = event.get("eventDate", "")
-            elif action == "expiration" and not expiration_date:
-                expiration_date = event.get("eventDate", "")
+    nameservers = ""
 
-    # Parse nameservers (join each ldhName with newline)
-    ns_list = []
-    if "nameservers" in data:
-        for ns in data["nameservers"]:
-            ns_name = ns.get("ldhName", "")
-            if ns_name:
-                ns_list.append(ns_name)
-    nameservers = "\n".join(ns_list)
+    if rdap_data:
+        # Parse dates from "events"
+        if "events" in rdap_data:
+            for event in rdap_data["events"]:
+                action = event.get("eventAction", "").lower()
+                if action in ["registration", "created"] and not creation_date:
+                    creation_date = event.get("eventDate", "")
+                elif action in ["last updated", "updated"] and not updated_date:
+                    updated_date = event.get("eventDate", "")
+                elif action == "expiration" and not expiration_date:
+                    expiration_date = event.get("eventDate", "")
+        # Parse nameservers (join each ldhName with newline)
+        ns_list = []
+        if "nameservers" in rdap_data:
+            for ns in rdap_data["nameservers"]:
+                ns_name = ns.get("ldhName", "")
+                if ns_name:
+                    ns_list.append(ns_name)
+        nameservers = "\n".join(ns_list)
 
-    # Default values for registrant and registrar
-    registrant_str = "Not Available"
-    registrar_str = ""
+        # Parse entities for contact information
+        if "entities" in rdap_data:
+            for entity in rdap_data["entities"]:
+                roles = entity.get("roles", [])
+                # Registrant: look for role "registrant"
+                if "registrant" in roles:
+                    handle = entity.get("handle", "")
+                    org = ""
+                    kind = ""
+                    if "vcardArray" in entity and len(entity["vcardArray"]) > 1:
+                        for item in entity["vcardArray"][1]:
+                            if len(item) >= 4:
+                                key = item[0].lower()
+                                value = item[3]
+                                if key == "org":
+                                    org = value
+                                elif key == "kind":
+                                    kind = value
+                    registrant_str = f"Handle: {handle}\nOrganization: {org}\nKind: {kind}"
+                # Registrar: look for role "registrar"
+                elif "registrar" in roles:
+                    handle = entity.get("handle", "")
+                    fn = ""
+                    url_val = ""
+                    if "vcardArray" in entity and len(entity["vcardArray"]) > 1:
+                        for item in entity["vcardArray"][1]:
+                            if len(item) >= 4:
+                                key = item[0].lower()
+                                value = item[3]
+                                if key == "fn":
+                                    fn = value
+                                elif key == "url":
+                                    url_val = value
+                    registrar_str = f"Name: {fn}\nIANA ID: {handle}\nURL: {url_val}"
 
-    # Parse entities for contact information
-    if "entities" in data:
-        for entity in data["entities"]:
-            roles = entity.get("roles", [])
-            # Registrant: look for role "registrant"
-            if "registrant" in roles:
-                handle = entity.get("handle", "")
-                org = ""
-                kind = ""
-                if "vcardArray" in entity and len(entity["vcardArray"]) > 1:
-                    for item in entity["vcardArray"][1]:
-                        if len(item) >= 4:
-                            key = item[0].lower()
-                            value = item[3]
-                            if key == "org":
-                                org = value
-                            elif key == "kind":
-                                kind = value
-                registrant_str = f"Handle: {handle}\nOrganization: {org}\nKind: {kind}"
-            # Registrar: look for role "registrar"
-            elif "registrar" in roles:
-                handle = entity.get("handle", "")
-                fn = ""
-                url_val = ""
-                if "vcardArray" in entity and len(entity["vcardArray"]) > 1:
-                    for item in entity["vcardArray"][1]:
-                        if len(item) >= 4:
-                            key = item[0].lower()
-                            value = item[3]
-                            if key == "fn":
-                                fn = value
-                            elif key == "url":
-                                url_val = value
-                registrar_str = f"Name: {fn}\nIANA ID: {handle}\nURL: {url_val}"
+    # Fallback condition: if primary method did not yield WHOIS data
+    if (registrant_str == "Not Available" and not registrar_str and not creation_date):
+        try:
+            fallback_data = await asyncio.to_thread(whois.whois, domain)
+            def format_date(dt):
+                if isinstance(dt, list):
+                    dt = dt[0] if dt else ""
+                if hasattr(dt, "isoformat"):
+                    return dt.isoformat()
+                return str(dt) if dt else ""
+            fallback_registrant = fallback_data.get("org") or fallback_data.get("name") or "Not Available"
+            registrant_str = f"Registrant: {fallback_registrant}"
+            registrar_str = fallback_data.get("registrar", "")
+            creation_date = format_date(fallback_data.get("creation_date", ""))
+            expiration_date = format_date(fallback_data.get("expiration_date", ""))
+            updated_date = format_date(fallback_data.get("updated_date", ""))
+            ns = fallback_data.get("name_servers", "")
+            if isinstance(ns, list):
+                nameservers = "\n".join(ns)
+            else:
+                nameservers = ns
+            fallback_used = True
+        except Exception as e:
+            rdap_error += f" | Fallback error: {str(e)}"
 
     return {
         "registrant": registrant_str,
@@ -139,7 +155,7 @@ async def get_whois_info(domain: str, session: aiohttp.ClientSession) -> dict:
         "expiration_date": expiration_date,
         "updated_date": updated_date,
         "name_servers": nameservers,
-        "error": ""
+        "error": "" if fallback_used else rdap_error
     }
 
 async def run_whois_checks(domains: List[str]) -> List[Tuple[str, str, str, str, str, str, str]]:
