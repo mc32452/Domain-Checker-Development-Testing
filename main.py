@@ -1,18 +1,17 @@
 import asyncio
 import aiohttp
 import dns.asyncresolver
-import csv
-import io
-import time
-import streamlit as st
 import pandas as pd
 import ssl
 import socket
 import datetime
+import time
 from urllib.parse import urlparse
-from crtsh import crtshAPI  # For Subdomain Finder
-from typing import List, Tuple, Dict, Any, Optional, Callable, Union
-import whois  # Added for fallback WHOIS lookup
+from crtsh import crtshAPI
+from typing import List, Dict, Any, Optional, Callable, Union, Tuple
+import whois
+import streamlit as st
+import plotly.express as px  # Added for visualizations
 
 # ------------------------------
 # Global Variables and Headers
@@ -27,26 +26,31 @@ http_headers: Dict[str, str] = {
     "Accept-Language": "en-GB,en;q=0.9,en-US;q=0.8,en-IE;q=0.7"
 }
 
+# Single resolver instance at application level
+resolver = dns.asyncresolver.Resolver()
+resolver.nameservers = ['8.8.8.8', '1.1.1.1']
+resolver.timeout = 5
+resolver.lifetime = 5
+resolver.cache = None
+
 # ------------------------------
 # Helper Function for crt.sh with Retry Mechanism
 # ------------------------------
-def get_crtsh_data(domain: str, max_retries: int = 3):
-    """Attempt to fetch crt.sh data with retries."""
+def get_crtsh_data(domain: str, max_retries: int = 3) -> Optional[List[Dict[str, Any]]]:
     for attempt in range(max_retries):
         try:
             data = crtshAPI().search(domain)
-            if data:  # if we got a valid response, return it immediately
+            if data:
                 return data
         except Exception as e:
             st.warning(f"crt.sh request attempt {attempt + 1} failed for domain {domain}: {e}")
         time.sleep(1.0)
-    # All attempts failed; return None without logging to a file.
     return None
 
 # ------------------------------
 # WHOIS Lookup Functions with RDAP Fallback
 # ------------------------------
-async def get_whois_info(domain: str, session: aiohttp.ClientSession) -> dict:
+async def get_whois_info(domain: str, session: aiohttp.ClientSession) -> Dict[str, str]:
     rdap_url = f"https://rdap.ports.domains/domain/{domain}"
     fallback_used = False
     rdap_error = ""
@@ -118,17 +122,15 @@ async def get_whois_info(domain: str, session: aiohttp.ClientSession) -> dict:
                                     url_val = value
                     registrar_str = f"Name: {fn}\nIANA ID: {handle}\nURL: {url_val}"
 
-    # New fallback condition: count missing key fields (registrant, registrar, creation_date)
     key_missing = 0
     if registrant_str == "Not Available":
-         key_missing += 1
+        key_missing += 1
     if not registrar_str:
-         key_missing += 1
+        key_missing += 1
     if not creation_date:
-         key_missing += 1
+        key_missing += 1
 
-    # Trigger WHOIS fallback if no RDAP data or 2 or more key fields are missing
-    if (not rdap_data or key_missing >= 2):
+    if not rdap_data or key_missing >= 2:
         try:
             fallback_data = await asyncio.to_thread(whois.whois, domain)
             def format_date(dt):
@@ -168,7 +170,7 @@ async def run_whois_checks(domains: List[str]) -> List[Tuple[str, str, str, str,
         results = await asyncio.gather(*tasks)
         output = []
         for domain, info in zip(domains, results):
-            output.append(( 
+            output.append((
                 domain,
                 info.get("registrant", "Not Available"),
                 info.get("registrar", ""),
@@ -180,7 +182,7 @@ async def run_whois_checks(domains: List[str]) -> List[Tuple[str, str, str, str,
         return output
 
 # ------------------------------
-# HTTP Check Functions with Improvements
+# HTTP Check Functions
 # ------------------------------
 def normalize_url(url_str: str) -> Tuple[str, str, str]:
     parsed = urlparse(url_str)
@@ -189,8 +191,6 @@ def normalize_url(url_str: str) -> Tuple[str, str, str]:
     return netloc, path, parsed.query
 
 async def is_domain_resolvable(domain: str) -> bool:
-    resolver = dns.asyncresolver.Resolver()
-    resolver.cache = None  # Disable caching
     try:
         await resolver.resolve(domain, 'A')
         return True
@@ -211,11 +211,9 @@ async def check_tcp_connectivity(domain: str, port: int, timeout: int = 3) -> bo
         return False
 
 async def check_http_domain(domain: str, timeout: int, retries: int, session: aiohttp.ClientSession, headers: Dict[str, str], semaphore: asyncio.Semaphore) -> Tuple[Any, ...]:
-    # First, check if the domain even resolves
     if not await is_domain_resolvable(domain):
         return (domain, "DNS Error", "DNS resolution failed", 0, 0, "No", "No redirect", "No")
 
-    # Try both HTTPS and HTTP (if no scheme provided)
     protocols = []
     if domain.startswith("http://") or domain.startswith("https://"):
         protocols = [""]
@@ -229,7 +227,7 @@ async def check_http_domain(domain: str, timeout: int, retries: int, session: ai
             start_time = time.perf_counter()
             try:
                 async with semaphore:
-                    async with session.get(url, headers=headers, timeout=timeout) as response:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
                         response_time = time.perf_counter() - start_time
                         status = response.status
                         text = await response.text()
@@ -243,20 +241,41 @@ async def check_http_domain(domain: str, timeout: int, retries: int, session: ai
                         return (domain, status, snippet, round(response_time, 2), attempt, "HTTP Success", redirect_info, redirected)
             except Exception as e:
                 last_exception = e
-                # Exponential backoff before retrying
+                if "Header value is too long" in str(e):
+                    try:
+                        async with semaphore:
+                            async with session.head(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True) as head_response:
+                                response_time = time.perf_counter() - start_time
+                                if head_response.history:
+                                    redirects = [str(resp.url) for resp in head_response.history] + [str(head_response.url)]
+                                    redirect_info = " -> ".join(redirects)
+                                    redirected = "Yes" if normalize_url(url) != normalize_url(str(head_response.url)) else "No"
+                                else:
+                                    redirect_info = "No redirect"
+                                    redirected = "No"
+                                tcp443 = await check_tcp_connectivity(domain, 443, timeout)
+                                if tcp443:
+                                    status = "HTTP Header Too Large"
+                                    snippet = "Header value exceeded limit"
+                                    response_received_str = "TCP: Received Response / HTTP: Header Too Large"
+                                    return (domain, status, snippet, round(response_time, 2), attempt, response_received_str, redirect_info, redirected)
+                    except Exception as head_e:
+                        tcp443 = await check_tcp_connectivity(domain, 443, timeout)
+                        if tcp443:
+                            status = "HTTP Header Too Large"
+                            snippet = "Header value exceeded limit"
+                            response_received_str = "TCP: Received Response / HTTP: Header Too Large"
+                            response_time = time.perf_counter() - start_time
+                            return (domain, status, snippet, round(response_time, 2), attempt, response_received_str, "No redirect", "No")
                 await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-    # If HTTP attempts failed, try a TCP connectivity check as a fallback
+
     start_time = time.perf_counter()
     tcp443 = await check_tcp_connectivity(domain, 443, timeout)
     tcp80 = await check_tcp_connectivity(domain, 80, timeout)
     response_time = time.perf_counter() - start_time
     tcp_status = "TCP Connection Successful" if (tcp443 or tcp80) else "TCP Connection Failed"
     status = f"{tcp_status} / HTTP Error: {str(last_exception)}"
-    # Set a more descriptive response message for the fallback branch
-    if tcp443 or tcp80:
-        response_received_str = "TCP: Received Response / HTTP: No Response"
-    else:
-        response_received_str = "TCP: No Response / HTTP: No Response"
+    response_received_str = "TCP: Received Response / HTTP: No Response" if (tcp443 or tcp80) else "TCP: No Response / HTTP: No Response"
     return (domain, status, status, round(response_time, 2), retries, response_received_str, "No redirect", "No")
 
 async def run_http_checks(domains: List[str], timeout: int, concurrency: int, retries: int) -> List[Tuple[Any, ...]]:
@@ -277,68 +296,83 @@ async def run_http_checks(domains: List[str], timeout: int, concurrency: int, re
 # ------------------------------
 # DNS Lookup Functions
 # ------------------------------
+async def resolve_dns_record(domain: str, rtype: str) -> List[str]:
+    """Consolidated function to resolve DNS records for a given record type."""
+    try:
+        answer = await resolver.resolve(domain, rtype)
+        return [rdata.to_text() for rdata in answer]
+    except dns.resolver.NoAnswer:
+        return ["No records found"]
+    except dns.resolver.NXDOMAIN:
+        return ["Domain does not exist"]
+    except dns.resolver.Timeout:
+        return ["Lookup timed out"]
+    except Exception as e:
+        return [f"Error: {str(e)}"]
+
 async def get_dns_record_for_domain(domain: str, record_types: List[str]) -> Tuple[str, Dict[str, Union[List[str], str]]]:
+    """Retrieve DNS records for specified record types, handling CNAME inheritance."""
     if not domain or '.' not in domain:
         return domain, {rtype: "Invalid domain format" for rtype in record_types}
     records: Dict[str, Union[List[str], str]] = {}
-    resolver = dns.asyncresolver.Resolver()
-    resolver.cache = None  # Disable caching
-    resolver.timeout = 5
-    resolver.lifetime = 5
-    resolver.nameservers = ['8.8.8.8', '1.1.1.1']
-    cname_result: Optional[List[str]] = None
-    try:
-        cname_answer = await resolver.resolve(domain, "CNAME")
-        cname_result = [rdata.to_text() for rdata in cname_answer]
-    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.Timeout):
-        cname_result = None
-    except Exception:
-        cname_result = None
-
+    cname_result = await resolve_dns_record(domain, "CNAME")
+    if cname_result and "No records found" not in cname_result:
+        records["CNAME"] = cname_result
     for rtype in record_types:
-        try:
-            if rtype in ["A", "AAAA"]:
-                if cname_result:
-                    target = cname_result[0].rstrip('.')
-                    answer = await resolver.resolve(target, rtype)
-                    record_list = [rdata.to_text() for rdata in answer]
-                    record_list = [f"{rec} (Inherited from {target})" for rec in record_list]
-                else:
-                    answer = await resolver.resolve(domain, rtype)
-                    record_list = [rdata.to_text() for rdata in answer]
-                records[rtype] = record_list if record_list else "No records found"
-            elif rtype == "MX":
-                answer = await resolver.resolve(domain, rtype)
-                mx_records: List[str] = []
-                for rdata in answer:
-                    target = str(rdata.exchange).rstrip('.')
-                    mx_str = f"Priority {rdata.preference}: {target}"
-                    mx_records.append(mx_str)
-                records[rtype] = mx_records if mx_records else "No records found"
+        if rtype in ["A", "AAAA"]:
+            if cname_result and "No records found" not in cname_result:
+                target = cname_result[0].rstrip('.')
+                record_list = await resolve_dns_record(target, rtype)
+                record_list = [f"{rec} (Inherited from {target})" for rec in record_list]
             else:
-                answer = await resolver.resolve(domain, rtype)
-                record_list = [rdata.to_text() for rdata in answer]
-                records[rtype] = record_list if record_list else "No records found"
-        except dns.resolver.NoAnswer:
-            records[rtype] = "No records found"
-        except dns.resolver.NXDOMAIN:
-            records[rtype] = "Domain does not exist"
-        except dns.resolver.Timeout:
-            records[rtype] = "Lookup timed out"
-        except Exception as e:
-            records[rtype] = f"Error: {str(e)}"
+                record_list = await resolve_dns_record(domain, rtype)
+            records[rtype] = record_list if record_list else "No records found"
+        elif rtype == "MX":
+            mx_records = await resolve_dns_record(domain, rtype)
+            if mx_records and "No records found" not in mx_records:
+                records[rtype] = [f"Priority {rdata.split()[0]}: {rdata.split()[1]}" for rdata in mx_records]
+            else:
+                records[rtype] = "No records found"
+        else:
+            record_list = await resolve_dns_record(domain, rtype)
+            records[rtype] = record_list if record_list else "No records found"
     if cname_result and "CNAME" not in record_types:
         records["CNAME_Inheritance"] = "Inherited from CNAME"
     return domain, records
 
+async def get_recursive_dns_summary(domain: str, record_types: List[str]) -> str:
+    summary_lines = []
+    for rtype in record_types:
+        chain = []
+        current = domain
+        while True:
+            cname_result = await resolve_dns_record(current, "CNAME")
+            if cname_result and "No records found" not in cname_result:
+                cname_value = cname_result[0].rstrip('.')
+                chain.append(f"CNAME: {cname_value} (from {current})")
+                current = cname_value
+            else:
+                break
+        records = await resolve_dns_record(current, rtype)
+        if records and "No records found" not in records:
+            chain.append(f"{rtype} Records (from {current}): {', '.join(records)}")
+        else:
+            chain.append(f"{rtype} Records: No records found")
+        summary_lines.append(f"{rtype} Resolution:\n" + "\n".join([f"  - {line}" for line in chain]))
+    return "\n\n".join(summary_lines)
+
 async def run_dns_checks(domains: List[str], record_types: List[str],
-                         progress_callback: Optional[Callable[[int, int], None]]) -> Dict[str, Any]:
+                        recursive_dns: bool, progress_callback: Optional[Callable[[int, int], None]]) -> Dict[str, Any]:
+    """Run DNS checks for multiple domains and record types."""
     results: Dict[str, Any] = {}
     tasks = [get_dns_record_for_domain(domain, record_types) for domain in domains]
     total = len(tasks)
     completed = 0
     for task in asyncio.as_completed(tasks):
         domain, result = await task
+        if recursive_dns:
+            recursive_summary = await get_recursive_dns_summary(domain, record_types)
+            result["Recursive DNS Resolution"] = recursive_summary
         results[domain] = result
         completed += 1
         if progress_callback:
@@ -368,23 +402,19 @@ def get_certificate_info(domain: str) -> Tuple[Optional[str], Optional[int], str
 async def process_certificate_check(domain: str) -> Tuple[Optional[str], Optional[int], str]:
     return await asyncio.to_thread(get_certificate_info, domain)
 
-async def process_cert_domain(domain: str) -> Tuple[str, str, str, str]:
-    cert_expiry_date, days_until_expiry, cert_error = await process_certificate_check(domain)
-    return (
-        domain,
-        cert_expiry_date if cert_expiry_date else "",
-        str(days_until_expiry) if days_until_expiry is not None else "",
-        cert_error
-    )
-
 async def run_certificate_checks(domains: List[str]) -> List[Tuple[str, str, str, str]]:
-    tasks = [process_cert_domain(domain) for domain in domains]
+    tasks = [process_certificate_check(domain) for domain in domains]
     results: List[Tuple[str, str, str, str]] = []
     total = len(tasks)
     progress_bar = st.progress(0)
     for i, task in enumerate(asyncio.as_completed(tasks), start=1):
-        result = await task
-        results.append(result)
+        cert_expiry_date, days_until_expiry, cert_error = await task
+        results.append((
+            domains[i-1],
+            cert_expiry_date if cert_expiry_date else "",
+            str(days_until_expiry) if days_until_expiry is not None else "",
+            cert_error
+        ))
         progress_bar.progress(int((i / total) * 100))
     return results
 
@@ -392,11 +422,6 @@ async def run_certificate_checks(domains: List[str]) -> List[Tuple[str, str, str
 # Wildcard DNS Check Function
 # ------------------------------
 async def check_wildcard_dns(domain: str, record_type: str = "A") -> str:
-    resolver = dns.asyncresolver.Resolver()
-    resolver.cache = None  # Disable caching
-    resolver.timeout = 5
-    resolver.lifetime = 5
-    resolver.nameservers = ['8.8.8.8', '1.1.1.1']
     random_sub = "wildcardtest" + str(int(time.time() * 1000)) + "." + domain
     try:
         await resolver.resolve(random_sub, record_type)
@@ -443,11 +468,30 @@ async def process_all_in_one(
     if dns_record_types:
         dns_result = await get_dns_record_for_domain(domain, dns_record_types)
         dns_records = dns_result[1]
-        dns_summary = ", ".join(
-            [f"{rtype}: {', '.join(val) if isinstance(val, list) else val}" for rtype, val in dns_records.items()]
-        )
-        result["DNS Records"] = dns_summary
-        recursive_dns = await get_recursive_dns_chain(domain, dns_record_types)
+        dns_lines = ["DNS Records:"]
+        for rtype, val in dns_records.items():
+            if rtype == "CNAME_Inheritance":
+                continue  # Skip this meta-field
+            dns_lines.append(f"{rtype}:")
+            if isinstance(val, list):
+                for record in val:
+                    dns_lines.append(f"  - {record}")
+            else:
+                dns_lines.append(f"  - {val}")
+            if rtype == "SOA" and isinstance(val, str) and " " in val:
+                soa_parts = val.split()
+                if len(soa_parts) >= 5:
+                    dns_lines[-1] = "  - Primary NS: " + soa_parts[0]
+                    dns_lines.append(f"    Contact: {soa_parts[1]}")
+                    dns_lines.append(f"    Serial: {soa_parts[2]}")
+                    dns_lines.append(f"    Refresh: {soa_parts[3]}")
+                    dns_lines.append(f"    Retry: {soa_parts[4]}")
+                    if len(soa_parts) >= 6:
+                        dns_lines.append(f"    Expire: {soa_parts[5]}")
+                    if len(soa_parts) >= 7:
+                        dns_lines.append(f"    Minimum TTL: {soa_parts[6]}")
+        result["DNS Records"] = "\n".join(dns_lines)
+        recursive_dns = await get_recursive_dns_summary(domain, dns_record_types)
         result["Recursive DNS Chain"] = recursive_dns
     if cert_enabled:
         cert_expiry_date, days_until_expiry, cert_error = await process_certificate_check(domain)
@@ -458,99 +502,6 @@ async def process_all_in_one(
         wildcard = await check_wildcard_dns(domain)
         result["Wildcard DNS"] = wildcard
     return result
-
-async def get_recursive_dns_chain(domain: str, record_types: List[str]) -> str:
-    resolver = dns.asyncresolver.Resolver()
-    resolver.cache = None  # Disable caching
-    resolver.timeout = 5
-    resolver.lifetime = 5
-    resolver.nameservers = ['8.8.8.8', '1.1.1.1']
-    output_lines: List[str] = []
-    output_lines.append(f"DNS Resolution for {domain}")
-    output_lines.append("    ")
-    if "A" in record_types or "AAAA" in record_types:
-        output_lines.append("A/AAAA Resolution:")
-        chain_lines: List[str] = []
-        current = domain
-        chain_lines.append(f"Start Domain: {current}")
-        last_cname: Optional[str] = None
-        while True:
-            try:
-                cname_answer = await resolver.resolve(current, "CNAME")
-                cname_list = [rdata.to_text() for rdata in cname_answer]
-                cname_value = cname_list[0]
-                chain_lines.append(f"CNAME: {cname_value} (inherited from {current})")
-                last_cname = current = cname_value.rstrip('.')
-            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.Timeout):
-                break
-            except Exception as e:
-                chain_lines.append(f"CNAME: Error: {str(e)}")
-                break
-        if "A" in record_types:
-            try:
-                a_answer = await resolver.resolve(current, "A")
-                a_recs = [rdata.to_text() for rdata in a_answer]
-                if last_cname:
-                    chain_lines.append(f"A Records (inherited from {current}): {', '.join(a_recs)}")
-                else:
-                    chain_lines.append(f"A Records: {', '.join(a_recs)}")
-            except Exception as e:
-                chain_lines.append(f"A Records: Error: {str(e)}")
-        if "AAAA" in record_types:
-            try:
-                aaaa_answer = await resolver.resolve(current, "AAAA")
-                aaaa_recs = [rdata.to_text() for rdata in aaaa_answer]
-                if last_cname:
-                    chain_lines.append(f"AAAA Records (inherited from {current}): {', '.join(aaaa_recs)}")
-                else:
-                    chain_lines.append(f"AAAA Records: {', '.join(aaaa_recs)}")
-            except Exception as e:
-                chain_lines.append(f"AAAA Records: Error: {str(e)}")
-        for cl in chain_lines:
-            output_lines.append("  - " + cl)
-        output_lines.append("")
-    if "MX" in record_types:
-        output_lines.append("MX Records:")
-        try:
-            mx_answer = await resolver.resolve(domain, "MX")
-            for rdata in mx_answer:
-                mx_chain: List[str] = [f"Priority {rdata.preference}: {str(rdata.exchange).rstrip('.') }"]
-                current_mx = str(rdata.exchange).rstrip('.')
-                while True:
-                    try:
-                        mx_cname_answer = await resolver.resolve(current_mx, "CNAME")
-                        cname_list = [rd.to_text() for rd in mx_cname_answer]
-                        cname_value = cname_list[0]
-                        mx_chain.append(f"CNAME: {cname_value} (inherited from {current_mx})")
-                        current_mx = cname_value.rstrip('.')
-                    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.Timeout):
-                        break
-                    except Exception as e:
-                        mx_chain.append(f"CNAME: Error: {str(e)}")
-                        break
-                try:
-                    a_answer = await resolver.resolve(current_mx, "A")
-                    a_recs = [rdata.to_text() for rdata in a_answer]
-                    mx_chain.append(f"A Records (from {current_mx}): {', '.join(a_recs)}")
-                except Exception as e:
-                    mx_chain.append(f"A Records: Error: {str(e)}")
-                for item in mx_chain:
-                    output_lines.append("  - " + item)
-                output_lines.append("")
-        except Exception as e:
-            output_lines.append(f"MX Records: Error: {str(e)}")
-            output_lines.append("")
-    for rtype in record_types:
-        if rtype not in ["A", "AAAA", "MX"]:
-            output_lines.append(f"{rtype} Records:")
-            try:
-                answer = await resolver.resolve(domain, rtype)
-                recs = [rdata.to_text() for rdata in answer]
-                output_lines.append("  - " + ", ".join(recs))
-            except Exception as e:
-                output_lines.append(f"  - Error: {str(e)}")
-            output_lines.append("")
-    return "\n".join(output_lines)
 
 async def run_all_in_one_checks(
     domains: List[str],
@@ -580,29 +531,34 @@ async def run_all_in_one_checks(
     return results
 
 # ------------------------------
-# Subdomain Finder Functions with Updated HTTP Check
+# Subdomain Finder Functions
 # ------------------------------
-async def check_subdomain_advanced(session: aiohttp.ClientSession, subdomain: str, timeout: int = 3, retries: int = 3, semaphore: Optional[asyncio.Semaphore] = None) -> Dict[str, Any]:
-    if semaphore is None:
-        semaphore = asyncio.Semaphore(20)
+async def check_subdomain_advanced(
+    session: aiohttp.ClientSession,
+    subdomain: str,
+    semaphore: asyncio.Semaphore,
+    timeout: int = 3,
+    retries: int = 3
+) -> Dict[str, Any]:
     result = await check_http_domain(subdomain, timeout, retries, session, http_headers, semaphore)
     domain, status, snippet, response_time, attempts, response_received, redirect_history, redirected = result
     return {
-         "Subdomain": domain,
-         "Status": status,
-         "HTTP Snippet": snippet,
-         "Response Time (s)": response_time,
-         "HTTP Attempts": attempts,
-         "Response Received": response_received,
-         "Redirect History": redirect_history,
-         "Redirected": redirected,
+        "Subdomain": domain,
+        "Status": status,
+        "HTTP Snippet": snippet,
+        "Response Time (s)": response_time,
+        "HTTP Attempts": attempts,
+        "Response Received": response_received,
+        "Redirect History": redirect_history,
+        "Redirected": redirected,
     }
 
-async def perform_http_checks(subdomain_list: List[str], progress_callback: Callable[[float], None]) -> List[Dict[str, Any]]:
+async def perform_http_checks(subdomain_list: List[str], progress_callback: Callable[[float], None], semaphore: asyncio.Semaphore) -> List[Dict[str, Any]]:
+    """Perform HTTP checks on subdomains using a properly configured TCPConnector."""
     results: List[Dict[str, Any]] = []
-    semaphore = asyncio.Semaphore(20)
-    async with aiohttp.ClientSession() as session:
-        tasks = [check_subdomain_advanced(session, sub) for sub in subdomain_list]
+    connector = aiohttp.TCPConnector(limit=100, ssl=True)  # Use valid parameters
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [check_subdomain_advanced(session, sub, semaphore) for sub in subdomain_list]
         total = len(tasks)
         for i, future in enumerate(asyncio.as_completed(tasks)):
             result = await future
@@ -616,7 +572,7 @@ async def perform_http_checks(subdomain_list: List[str], progress_callback: Call
 st.set_page_config(page_title="Domain Checker", layout="wide")
 st.title("Domain Checker")
 
-# Initialize session state keys to avoid KeyErrors in the Subdomain Finder tab
+# Initialize session state for Subdomain Finder
 if "subdomain_results" not in st.session_state:
     st.session_state["subdomain_results"] = []
 if "subdomain_online" not in st.session_state:
@@ -629,11 +585,11 @@ if "searched_domain" not in st.session_state:
     st.session_state["searched_domain"] = ""
 
 tabs = st.tabs([
-    "HTTP Check", 
-    "DNS Lookup", 
-    "WHOIS Lookup", 
-    "TLS/SSL Certificate Check", 
-    "Subdomain Finder", 
+    "HTTP Check",
+    "DNS Lookup",
+    "WHOIS Lookup",
+    "TLS/SSL Certificate Check",
+    "Subdomain Finder",
     "Advanced Check"
 ])
 
@@ -643,9 +599,9 @@ with tabs[0]:
     st.markdown("Retrieve HTTP status code, response snippet, response time, and redirection details to verify website availability and performance.")
     with st.form("http_form"):
         domains_input_http: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
-        timeout: int = st.number_input("Timeout (seconds)", min_value=1, value=10, step=1, help="Maximum time to wait for a response.")
-        concurrency: int = st.number_input("Concurrency", min_value=1, value=20, step=1, help="Number of simultaneous HTTP requests.")
-        retries: int = st.number_input("Retries", min_value=1, value=3, step=1, help="Number of retry attempts per domain.")
+        timeout: int = st.number_input("Timeout (seconds)", min_value=1, value=10, step=1)
+        concurrency: int = st.number_input("Concurrency", min_value=1, value=20, step=1)
+        retries: int = st.number_input("Retries", min_value=1, value=3, step=1)
         submit_http = st.form_submit_button("Run HTTP Check")
 
     if submit_http:
@@ -660,10 +616,9 @@ with tabs[0]:
                 columns=["Domain", "Status", "HTTP Snippet", "HTTP Response Time (s)",
                          "HTTP Attempts", "Response Received", "Redirect History", "Redirected"]
             )
-            # Force Status column to string to avoid Arrow conversion issues
             df_http["Status"] = df_http["Status"].astype(str)
             st.write("### HTTP Check Results")
-            st.caption("Double click any cell in the table to view its full content.")
+            st.caption("Double click any cell to view full content.")
             st.write(df_http)
             st.session_state["http_df"] = df_http
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
@@ -678,6 +633,7 @@ with tabs[1]:
     st.markdown("Perform DNS record lookups for specified domain(s). Use advanced search for recursive DNS lookups.")
     with st.form("dns_form"):
         domains_input_dns: str = st.text_area("Enter one or more domains (one per line):", height=150, help="Example: example.com")
+        recursive_dns = st.checkbox("Enable Recursive DNS Lookup", value=False)
         st.markdown("### Select DNS Record Types")
         record_options: List[str] = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
         selected_record_types: List[str] = []
@@ -689,7 +645,6 @@ with tabs[1]:
         submit_dns = st.form_submit_button("Lookup DNS Records")
 
     if submit_dns:
-        # Clear previous DNS lookup results from session state to ensure fresh data.
         st.session_state.pop("dns_df", None)
         if not domains_input_dns.strip():
             st.error("Please enter at least one domain.")
@@ -703,41 +658,36 @@ with tabs[1]:
             def progress_callback(completed: int, total: int) -> None:
                 progress_bar.progress(int((completed / total) * 100))
             start_time = time.time()
-            dns_results = asyncio.run(run_dns_checks(domains_dns, selected_record_types, progress_callback))
+            dns_results = asyncio.run(run_dns_checks(domains_dns, selected_record_types, recursive_dns, progress_callback))
             end_time = time.time()
             elapsed_time = end_time - start_time
-            csv_output = io.StringIO()
-            csv_writer = csv.writer(csv_output)
-            header = ["Domain"] + selected_record_types
-            if any("CNAME_Inheritance" in recs for recs in dns_results.values()):
-                header.append("CNAME_Inheritance")
-            csv_writer.writerow(header)
             data_rows = []
             for domain, recs in dns_results.items():
-                row = [domain]
+                row = {"Domain": domain}
                 for rtype in selected_record_types:
                     val = recs.get(rtype, "")
                     if isinstance(val, list):
-                        val = "; ".join(val)
-                    row.append(val)
-                if "CNAME_Inheritance" in header:
-                    row.append(recs.get("CNAME_Inheritance", ""))
+                        val = "\n".join(val)
+                    row[rtype] = val
+                if "CNAME_Inheritance" in recs:
+                    row["CNAME_Inheritance"] = recs["CNAME_Inheritance"]
+                if recursive_dns:
+                    row["Recursive DNS Resolution"] = recs.get("Recursive DNS Resolution", "")
                 data_rows.append(row)
-                csv_writer.writerow(row)
-            csv_data = csv_output.getvalue()
+            df_dns = pd.DataFrame(data_rows)
             st.write("### DNS Results")
-            st.caption("Double click any cell in the table to view its full content.")
-            df_dns = pd.DataFrame(data_rows, columns=header)
+            st.caption("Double click any cell to view full content.")
             st.write(df_dns)
             st.session_state["dns_df"] = df_dns
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
+            csv_data = df_dns.to_csv(index=False)
             st.download_button("Download Table as CSV", data=csv_data,
                                file_name=f"DNS_Lookup_Results_{date_str}.csv", mime="text/csv")
             with st.expander("View Statistics"):
                 st.write(f"**Time Taken:** {elapsed_time:.2f} seconds")
                 st.write(f"**Processing Speed:** {total_domains / elapsed_time:.2f} domains/second")
     elif "dns_df" in st.session_state:
-        st.write("DNS Results", st.session_state["dns_df"])
+        st.write("### DNS Results", st.session_state["dns_df"])
 
 # WHOIS Lookup Tab
 with tabs[2]:
@@ -759,7 +709,7 @@ with tabs[2]:
                 columns=["Domain", "Registrant", "Registrar", "WHOIS Creation Date", "WHOIS Expiration Date", "Last Updated", "Name Servers"]
             )
             st.write("### WHOIS Lookup Results")
-            st.caption("Double click any cell in the table to view its full content.")
+            st.caption("Double click any cell to view full content.")
             st.write(df_whois)
             st.session_state["whois_df"] = df_whois
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
@@ -771,7 +721,7 @@ with tabs[2]:
 # TLS/SSL Certificate Check Tab
 with tabs[3]:
     st.header("TLS/SSL Certificate Check")
-    st.markdown("Perform a TLS/SSL certificate check for each domain. This check returns the certificate expiry date and the number of days until expiry.")
+    st.markdown("Perform a TLS/SSL certificate check for each domain.")
     with st.form("cert_form"):
         domains_input_cert: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
         submit_cert = st.form_submit_button("Run TLS/SSL Certificate Check")
@@ -790,7 +740,7 @@ with tabs[3]:
             if "Certificate Error" in df_cert.columns and df_cert["Certificate Error"].astype(str).str.strip().eq("").all():
                 df_cert.drop(columns=["Certificate Error"], inplace=True)
             st.write("### TLS/SSL Certificate Check Results")
-            st.caption("Double click any cell in the table to view its full content.")
+            st.caption("Double click any cell to view full content.")
             st.write(df_cert)
             st.session_state["cert_df"] = df_cert
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
@@ -802,32 +752,14 @@ with tabs[3]:
 # Subdomain Finder Tab
 with tabs[4]:
     st.header("Subdomain Finder")
-    st.write("Extracts subdomains from crt.sh certificate transparency logs and checks them via HTTP, with a TCP fallback if needed.")
-    st.caption("This tool relies on an external API (crt.sh) to retrieve certificate transparency logs. As a result, it may experience outages or intermittent issues.")
-    domain_input: str = st.text_input("Enter a naked domain (e.g. example.com):", help="Do not include www or subdomains.")
-    import streamlit.components.v1 as components
-    components.html(
-        """
-        <script>
-        const input = window.parent.document.querySelector('input[aria-label="Enter a naked domain (e.g. example.com):"]');
-        if(input){
-            input.addEventListener('keydown', function(e) {
-                if(e.ctrlKey && e.key === "Enter"){
-                    const btn = window.parent.document.querySelector('button[data-baseweb="button"]');
-                    if(btn){ btn.click(); }
-                }
-            });
-        }
-        </script>
-        """,
-        height=0
-    )
+    st.write("Extracts subdomains from crt.sh and checks them via HTTP with TCP fallback.")
+    domain_input: str = st.text_input("Enter a naked domain (e.g. example.com):", help="No www or subdomains.")
     if st.button("Search") and domain_input:
-        with st.spinner(text=f"Searching for subdomains of {domain_input}... This can take a few minutes."):
+        with st.spinner(text=f"Searching for subdomains of {domain_input}..."):
             try:
                 data = get_crtsh_data(domain_input, max_retries=3)
                 if not data:
-                    st.error("crt.sh request failed after multiple attempts. The domain may not have any certificate records or the API might be unavailable. (Try again or try another domain)")
+                    st.error("crt.sh request failed. No certificate records or API unavailable.")
                 else:
                     subdomains = set()
                     for entry in data:
@@ -842,13 +774,14 @@ with tabs[4]:
                     progress_bar = st.progress(0)
                     def update_progress(value: float) -> None:
                         progress_bar.progress(value)
-                    results = asyncio.run(perform_http_checks(subdomain_list, update_progress))
+                    semaphore = asyncio.Semaphore(20)
+                    results = asyncio.run(perform_http_checks(subdomain_list, update_progress, semaphore))
 
-                    # Partition results into three groups:
                     online_results = [
-                        res for res in results 
+                        res for res in results
                         if ((res.get("Status") is not None and isinstance(res.get("Status"), int) and (res.get("Status") < 400 or res.get("Status") == 401))
-                            or (res.get("Redirected") == "Yes"))
+                            or res.get("Redirected") == "Yes"
+                            or res.get("Status") == "HTTP Header Too Large")
                     ]
                     offline_candidates = [res for res in results if res not in online_results]
                     flagged_unreachable = [res for res in offline_candidates if res.get("Status") != "DNS Error"]
@@ -860,7 +793,6 @@ with tabs[4]:
                     st.session_state["subdomain_offline"] = offline_results
                     st.session_state["searched_domain"] = domain_input
 
-                    # Button to download all subdomain results together
                     date_str = datetime.datetime.now().strftime("%d.%m.%Y")
                     df_all_subdomains = pd.DataFrame(results)
                     st.download_button(
@@ -871,81 +803,92 @@ with tabs[4]:
                     )
 
                     st.subheader("Online Subdomains")
-                    st.markdown(
-                        "This table lists subdomains that have successfully responded to connectivity tests. "
-                        "They have valid DNS records and returned a positive HTTP response (or were redirected correctly) "
-                        "This indicates that they are active and currently hosting content or services."
-                    )
                     if online_results:
                         df_online = pd.DataFrame(online_results)
                         st.write(df_online)
-                        file_name_online = f"{domain_input}_online_subdomains_{date_str}.csv"
-                        csv_online = df_online.to_csv(index=False).encode("utf-8")
                         st.download_button(
                             label="Download Online Subdomains as CSV",
-                            data=csv_online,
-                            file_name=file_name_online,
+                            data=df_online.to_csv(index=False).encode("utf-8"),
+                            file_name=f"{domain_input}_online_subdomains_{date_str}.csv",
                             mime="text/csv"
                         )
                     else:
                         st.write("No online subdomains found.")
 
                     st.subheader("Flagged/Unreachable Subdomains")
-                    st.markdown(
-                        "This table displays subdomains that have valid DNS records yet failed both TCP and/or HTTP connectivity checks. "
-                        "This suggests that while the domain name is properly resolving, the server is not accepting connections. "
-                        "Review these domains further before taking any further actions."
-                    )
                     if flagged_unreachable:
                         df_flagged = pd.DataFrame(flagged_unreachable)
                         st.write(df_flagged)
-                        file_name_flagged = f"{domain_input}_flagged_unreachable_subdomains_{date_str}.csv"
-                        csv_flagged = df_flagged.to_csv(index=False).encode("utf-8")
                         st.download_button(
                             label="Download Flagged/Unreachable Subdomains as CSV",
-                            data=csv_flagged,
-                            file_name=file_name_flagged,
+                            data=df_flagged.to_csv(index=False).encode("utf-8"),
+                            file_name=f"{domain_input}_flagged_unreachable_subdomains_{date_str}.csv",
                             mime="text/csv"
                         )
                     else:
                         st.write("No flagged/unreachable subdomains found.")
 
                     st.subheader("Offline Subdomains")
-                    st.markdown(
-                        "This table displays subdomains that do not have valid DNS records or received a DNS Error."
-                    )
                     if offline_results:
                         df_offline = pd.DataFrame(offline_results)
                         st.write(df_offline)
-                        file_name_offline = f"{domain_input}_offline_subdomains_{date_str}.csv"
-                        csv_offline = df_offline.to_csv(index=False).encode("utf-8")
                         st.download_button(
                             label="Download Offline Subdomains as CSV",
-                            data=csv_offline,
-                            file_name=file_name_offline,
+                            data=df_offline.to_csv(index=False).encode("utf-8"),
+                            file_name=f"{domain_input}_offline_subdomains_{date_str}.csv",
                             mime="text/csv"
                         )
                     else:
                         st.write("No offline subdomains found.")
+
+                    # Graphs Expander
+                    with st.expander("Graphs"):
+                        # Pie Chart: Subdomain Status Distribution
+                        status_counts = {
+                            "Online": len(st.session_state["subdomain_online"]),
+                            "Flagged/Unreachable": len(st.session_state["subdomain_flagged"]),
+                            "Offline": len(st.session_state["subdomain_offline"])
+                        }
+                        if sum(status_counts.values()) > 0:
+                            fig_pie = px.pie(
+                                names=list(status_counts.keys()),
+                                values=list(status_counts.values()),
+                                title="Subdomain Status Distribution"
+                            )
+                            st.plotly_chart(fig_pie, use_container_width=True)
+                        else:
+                            st.write("No subdomain data available for pie chart.")
+
+                        # Bar Chart: Response Times for Online Subdomains
+                        if st.session_state["subdomain_online"]:
+                            online_subdomains = [res["Subdomain"] for res in st.session_state["subdomain_online"]]
+                            response_times = [res["Response Time (s)"] for res in st.session_state["subdomain_online"]]
+                            fig_bar = px.bar(
+                                x=online_subdomains,
+                                y=response_times,
+                                title="Response Times for Online Subdomains",
+                                labels={"x": "Subdomain", "y": "Response Time (s)"}
+                            )
+                            st.plotly_chart(fig_bar, use_container_width=True)
+                        else:
+                            st.write("No online subdomains to display response times.")
             except Exception as e:
                 st.error(f"An error occurred: {e}")
-    # Only display past results if a search has been performed (i.e. searched_domain is not empty)
     elif st.session_state.get("searched_domain", ""):
-        st.write(f"Showing previously searched results for domain: {st.session_state['searched_domain']}")
+        st.write(f"Showing results for: {st.session_state['searched_domain']}")
         online_results = st.session_state["subdomain_online"]
         flagged_unreachable = st.session_state["subdomain_flagged"]
         offline_results = st.session_state["subdomain_offline"]
+
         st.subheader("Online Subdomains")
         if online_results:
             df_online = pd.DataFrame(online_results)
             st.write(df_online)
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
-            file_name_online = f"{st.session_state['searched_domain']}_online_subdomains_{date_str}.csv"
-            csv_online = df_online.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download Online Subdomains as CSV",
-                data=csv_online,
-                file_name=file_name_online,
+                data=df_online.to_csv(index=False).encode("utf-8"),
+                file_name=f"{st.session_state['searched_domain']}_online_subdomains_{date_str}.csv",
                 mime="text/csv"
             )
         else:
@@ -956,12 +899,10 @@ with tabs[4]:
             df_flagged = pd.DataFrame(flagged_unreachable)
             st.write(df_flagged)
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
-            file_name_flagged = f"{st.session_state['searched_domain']}_flagged_unreachable_subdomains_{date_str}.csv"
-            csv_flagged = df_flagged.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download Flagged/Unreachable Subdomains as CSV",
-                data=csv_flagged,
-                file_name=file_name_flagged,
+                data=df_flagged.to_csv(index=False).encode("utf-8"),
+                file_name=f"{st.session_state['searched_domain']}_flagged_unreachable_subdomains_{date_str}.csv",
                 mime="text/csv"
             )
         else:
@@ -972,26 +913,56 @@ with tabs[4]:
             df_offline = pd.DataFrame(offline_results)
             st.write(df_offline)
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
-            file_name_offline = f"{st.session_state['searched_domain']}_offline_subdomains_{date_str}.csv"
-            csv_offline = df_offline.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download Offline Subdomains as CSV",
-                data=csv_offline,
-                file_name=file_name_offline,
+                data=df_offline.to_csv(index=False).encode("utf-8"),
+                file_name=f"{st.session_state['searched_domain']}_offline_subdomains_{date_str}.csv",
                 mime="text/csv"
             )
         else:
             st.write("No offline subdomains found.")
 
+        # Graphs Expander for Cached Results
+        with st.expander("Graphs"):
+            # Pie Chart: Subdomain Status Distribution
+            status_counts = {
+                "Online": len(st.session_state["subdomain_online"]),
+                "Flagged/Unreachable": len(st.session_state["subdomain_flagged"]),
+                "Offline": len(st.session_state["subdomain_offline"])
+            }
+            if sum(status_counts.values()) > 0:
+                fig_pie = px.pie(
+                    names=list(status_counts.keys()),
+                    values=list(status_counts.values()),
+                    title="Subdomain Status Distribution"
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.write("No subdomain data available for pie chart.")
+
+            # Bar Chart: Response Times for Online Subdomains
+            if st.session_state["subdomain_online"]:
+                online_subdomains = [res["Subdomain"] for res in st.session_state["subdomain_online"]]
+                response_times = [res["Response Time (s)"] for res in st.session_state["subdomain_online"]]
+                fig_bar = px.bar(
+                    x=online_subdomains,
+                    y=response_times,
+                    title="Response Times for Online Subdomains",
+                    labels={"x": "Subdomain", "y": "Response Time (s)"}
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.write("No online subdomains to display response times.")
+
 # Advanced Check Tab
 with tabs[5]:
     st.header("Advanced Check")
-    st.markdown("Combine HTTP, DNS, WHOIS, and TLS/SSL lookups into one comprehensive report.")
+    st.markdown("Combine HTTP, DNS, WHOIS, and TLS/SSL lookups into one report.")
     with st.form("all_form"):
         domains_input_all: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
-        wildcard_enabled: bool = st.checkbox("Check for Wildcard DNS", value=False, key="check_wildcard")
-        whois_enabled: bool = st.checkbox("Enable WHOIS Lookup", value=False, key="all_whois_enabled")
-        cert_enabled: bool = st.checkbox("Enable TLS/SSL Certificate Check", value=False, key="all_cert_enabled")
+        wildcard_enabled: bool = st.checkbox("Check for Wildcard DNS", value=False)
+        whois_enabled: bool = st.checkbox("Enable WHOIS Lookup", value=False)
+        cert_enabled: bool = st.checkbox("Enable TLS/SSL Certificate Check", value=False)
         st.markdown("### Select DNS Record Types")
         record_options_all: List[str] = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
         selected_dns_all: List[str] = []
@@ -999,10 +970,10 @@ with tabs[5]:
         for i, rtype in enumerate(record_options_all):
             col = cols[i % 4]
             if col.checkbox(rtype, value=True, key=f"all_checkbox_{rtype}"):
-                selected_dns_all.append(rtype)      
-        timeout_all: int = st.number_input("HTTP Timeout (seconds)", min_value=1, value=10, step=1, help="Max time (in seconds) for HTTP requests.")
-        concurrency_all: int = st.number_input("HTTP Concurrency", min_value=1, value=20, step=1, help="Number of simultaneous HTTP requests.")
-        retries_all: int = st.number_input("HTTP Retries", min_value=1, value=3, step=1, help="Number of retry attempts per domain.")
+                selected_dns_all.append(rtype)
+        timeout_all: int = st.number_input("HTTP Timeout (seconds)", min_value=1, value=10, step=1)
+        concurrency_all: int = st.number_input("HTTP Concurrency", min_value=1, value=20, step=1)
+        retries_all: int = st.number_input("HTTP Retries", min_value=1, value=3, step=1)
         submit_all = st.form_submit_button("Run Advanced Check")
 
     if submit_all:
@@ -1043,7 +1014,6 @@ with tabs[5]:
                 columns.append("Certificate Error")
             df_all = pd.DataFrame(all_results)
             df_all = df_all[[col for col in columns if col in df_all.columns]]
-            # Force Status column to string to avoid Arrow conversion issues
             if "Status" in df_all.columns:
                 df_all["Status"] = df_all["Status"].astype(str)
             if "WHOIS Error" in df_all.columns and df_all["WHOIS Error"].astype(str).str.strip().eq("").all():
@@ -1051,7 +1021,7 @@ with tabs[5]:
             if "Certificate Error" in df_all.columns and df_all["Certificate Error"].astype(str).str.strip().eq("").all():
                 df_all.drop(columns=["Certificate Error"], inplace=True)
             st.write("### Advanced Check Results")
-            st.caption("Double click any cell in the table to view its full content.")
+            st.caption("Double click any cell to view full content.")
             st.write(df_all)
             st.session_state["adv_df"] = df_all
             date_str = datetime.datetime.now().strftime("%d.%m.%Y")
@@ -1077,4 +1047,4 @@ with tabs[5]:
                     st.write(f"The slowest response was from {slowest_domains[0]} taking {max_time:.2f} seconds.")
                 st.write(f"**Speed per Domain:** {speed:.2f} domains per second")
             else:
-                st.write("No HTTP response times available for advanced statistics.")
+                st.write("No HTTP response times available.")
