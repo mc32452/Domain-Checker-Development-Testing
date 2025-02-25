@@ -1,126 +1,130 @@
 # Domain Checker
 
-## Overview
-Domain Checker is an asynchronous domain analysis tool designed to perform a comprehensive set of domain checks. 
-It provides multiple functionalities including HTTP status checks, DNS lookups, WHOIS queries, TLS/SSL certificate validations, subdomain discovery via certificate transparency logs (crt.sh), and an advanced mode that combines all checks into one report. 
-The tool leverages Python's asynchronous programming features (using `asyncio` and `aiohttp`) to handle multiple domains concurrently, ensuring efficient and speedy execution.
+**Domain Checker** is a powerful, web-based tool built with Streamlit that enables users to perform a variety of domain-related checks, including HTTP status verification, DNS record lookups, WHOIS information retrieval, TLS/SSL certificate validation, subdomain discovery, and an advanced combined analysis. Designed for accessibility and efficiency, this application provides an intuitive interface for both casual users and developers to monitor and analyze domain health and configuration.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Usage](#usage)
+  - [HTTP Check](#http-check)
+  - [DNS Lookup](#dns-lookup)
+  - [WHOIS Lookup](#whois-lookup)
+  - [TLS/SSL Certificate Check](#tlsssl-certificate-check)
+  - [Subdomain Finder](#subdomain-finder)
+  - [Advanced Check](#advanced-check)
+- [Visualizations](#visualizations)
+- [Technical Details](#technical-details)
+- [Known Issues and Limitations](#known-issues-and-limitations)
+
+---
 
 ## Features
-- **HTTP Check:**  
-  Retrieve HTTP status codes, response snippets, response times, and redirection details for a given domain.
-  
-- **DNS Lookup:**  
-  Perform DNS record lookups for various types (A, AAAA, CNAME, MX, NS, SOA, TXT) and generate recursive DNS resolution chains to trace CNAME and A/AAAA records.
 
-- **WHOIS Check:**  
-  Obtain domain registration details such as registrar, creation and expiration dates, and name servers, with built-in caching to minimize repeated lookups.
+- **HTTP Check**: Assess website availability with HTTP status codes, response times, snippets, and redirection details.
+- **DNS Lookup**: Query DNS records (A, AAAA, CNAME, MX, NS, SOA, TXT) with optional recursive resolution.
+- **WHOIS Lookup**: Fetch domain registration details such as registrant, registrar, and expiration dates.
+- **TLS/SSL Certificate Check**: Validate certificate expiry and calculate remaining days.
+- **Subdomain Finder**: Identify subdomains via crt.sh and check their HTTP status.
+- **Advanced Check**: Combine HTTP, DNS, WHOIS, and TLS/SSL checks into a single detailed report.
+- **Interactive Visualizations**: View subdomain status and response time distributions with pie and bar charts.
+- **Asynchronous Processing**: Leverage asynchronous operations for fast, concurrent domain checks.
+- **User-Friendly Interface**: Built with Streamlit for an interactive and streamlined experience.
 
-- **TLS/SSL Certificate Check:**  
-  Connect via SSL to retrieve certificate details, including the expiry date and the number of days until the certificate expires.
+---
 
-- **Subdomain Finder:**  
-  Query crt.sh for subdomains associated with a domain, then perform HTTP checks on the discovered subdomains to determine their availability.
+## Usage
 
-- **Advanced Check:**  
-  Combine HTTP, DNS, WHOIS, TLS/SSL certificate, and wildcard DNS checks into one comprehensive report for a list of domains.
+The Domain Checker interface is organized into six tabs, each dedicated to a specific function. Here’s how to use each one:
 
-## Dependencies
-The program relies on several Python libraries. Ensure that you have Python 3.7 or later installed, then install the following packages:
+### HTTP Check
 
-- [asyncio](https://docs.python.org/3/library/asyncio.html) (built-in)
-- [aiohttp](https://docs.aiohttp.org/)
-- [dnspython](https://www.dnspython.org/) (specifically `dns.asyncresolver`)
-- [csv](https://docs.python.org/3/library/csv.html) (built-in)
-- [io](https://docs.python.org/3/library/io.html) (built-in)
-- [time](https://docs.python.org/3/library/time.html) (built-in)
-- [streamlit](https://streamlit.io/)
-- [pandas](https://pandas.pydata.org/)
-- [python-whois](https://pypi.org/project/python-whois/)
-- [ssl](https://docs.python.org/3/library/ssl.html) (built-in)
-- [socket](https://docs.python.org/3/library/socket.html) (built-in)
-- [datetime](https://docs.python.org/3/library/datetime.html) (built-in)
-- [crtsh](https://pypi.org/project/crtsh/) (for subdomain discovery)
-- [typing](https://docs.python.org/3/library/typing.html) (built-in)
-```
-```
+- **Purpose**: Verify website availability and performance.
+- **Input**:
+  - Enter one or more domain names (e.g., `example.com`), one per line.
+  - Adjust optional settings like timeout, concurrency, and retry attempts.
+- **Output**:
+  - A table with columns: domain, HTTP status, response snippet, response time, attempts, response received, redirect history, and redirection status.
+  - Downloadable CSV file option.
 
-## How It Works
-The application is organized into several key modules that handle specific types of domain checks. Below is an overview of the core components:
+### DNS Lookup
 
-### HTTP Checks
-- **Key Functions:** `check_http_domain`, `run_http_checks`  
-- **Description:**  
-  - **`check_http_domain`:** Attempts to connect to a domain using HTTP/HTTPS. It supports retry logic and measures the response time. It also handles redirection by comparing normalized URLs.
-  - **`run_http_checks`:** Manages multiple concurrent HTTP requests using an asyncio semaphore to limit concurrency. Progress is updated using Streamlit's progress bar.
+- **Purpose**: Retrieve DNS records for specified types.
+- **Input**:
+  - Enter one or more domain names.
+  - Choose record types (A, AAAA, CNAME, MX, NS, SOA, TXT).
+  - Toggle recursive DNS lookup for resolution chain details.
+- **Output**:
+  - A table displaying domain and DNS records.
+  - Recursive lookup results (if enabled) in an additional column.
+  - Downloadable CSV file option.
 
-### DNS Lookups
-- **Key Functions:** `get_dns_record_for_domain`, `run_dns_checks`, `get_recursive_dns_chain`  
-- **Description:**  
-  - **`get_dns_record_for_domain`:** Uses `dns.asyncresolver` to retrieve DNS records (A, AAAA, MX, etc.) for a domain. It also checks for CNAME inheritance.
-  - **`get_recursive_dns_chain`:** Builds a chain of DNS resolutions by following CNAME records and retrieving the final A/AAAA records.
-  - **`run_dns_checks`:** Executes DNS queries concurrently for multiple domains and provides progress feedback.
+### WHOIS Lookup
 
-### WHOIS Checks
-- **Key Functions:** `get_whois_info`, `process_whois_domain`, `run_whois_checks`  
-- **Description:**  
-  - **`get_whois_info`:** Retrieves WHOIS information using the `python-whois` library. It includes retry logic and caching to prevent repeated queries.
-  - **`process_whois_domain` & `run_whois_checks`:** Wrap the synchronous WHOIS lookup in asynchronous calls to enable concurrent processing of multiple domains.
+- **Purpose**: Access domain registration information.
+- **Input**:
+  - Enter one or more domain names.
+- **Output**:
+  - A table with domain, registrant, registrar, creation date, expiration date, last updated, and name servers.
+  - Downloadable CSV file option.
 
-### TLS/SSL Certificate Checks
-- **Key Functions:** `get_certificate_info`, `process_certificate_check`, `run_certificate_checks`  
-- **Description:**  
-  - **`get_certificate_info`:** Establishes an SSL connection to extract certificate details such as the expiry date and calculates days until expiration.
-  - **`process_certificate_check` & `run_certificate_checks`:** Enable asynchronous certificate checks across multiple domains.
+### TLS/SSL Certificate Check
+
+- **Purpose**: Inspect TLS/SSL certificate validity.
+- **Input**:
+  - Enter one or more domain names.
+- **Output**:
+  - A table showing domain, certificate expiry date, days until expiry, and errors (if any).
+  - Downloadable CSV file option.
 
 ### Subdomain Finder
-- **Key Functions:** `check_subdomain_advanced`, `perform_http_checks`  
-- **Description:**  
-  - Uses the `crtshAPI` to search for subdomains associated with a given domain.
-  - Performs HTTP checks on each discovered subdomain to determine if they are live (i.e., responding with HTTP status codes below 400 or through redirections).
+
+- **Purpose**: Discover and check subdomains.
+- **Input**:
+  - Enter a naked domain (e.g., `example.com`).
+- **Output**:
+  - Lists of online, flagged/unreachable, and offline subdomains with HTTP check details.
+  - Interactive pie chart of subdomain status distribution.
+  - Bar chart of response times for online subdomains.
+  - Downloadable CSV files for each category.
 
 ### Advanced Check
-- **Key Functions:** `process_all_in_one`, `run_all_in_one_checks`  
-- **Description:**  
-  - Combines all the checks (HTTP, DNS, WHOIS, TLS/SSL certificate, and wildcard DNS) into one comprehensive report.
-  - Offers detailed insights including certificate status, DNS record details, WHOIS data, and HTTP performance metrics.
 
-## Streamlit User Interface
-The user interface is built using Streamlit and is divided into several tabs:
-- **HTTP Check Tab:** Input domains and parameters to perform HTTP checks.
-- **DNS Lookup Tab:** Enter domains, select DNS record types, and view DNS results along with recursive resolution chains.
-- **WHOIS Check Tab:** Input domains to fetch WHOIS registration details.
-- **TLS/SSL Certificate Check Tab:** Perform certificate checks to get expiry dates and days until expiry.
-- **Subdomain Finder Tab:** Input a domain to find subdomains via crt.sh and check their availability.
-- **Advanced Check Tab:** Combine multiple checks into a single comprehensive analysis.
+- **Purpose**: Perform a multi-faceted domain analysis.
+- **Input**:
+  - Enter one or more domain names.
+  - Enable optional checks: WHOIS, TLS/SSL, wildcard DNS.
+  - Select DNS record types (if DNS is included).
+- **Output**:
+  - A comprehensive table combining results from selected checks.
+  - Downloadable CSV file option.
 
-Each tab provides forms for user input, displays results in formatted tables (using Pandas DataFrames), and offers options to download the results as CSV files.
+---
 
-## Detailed Code Documentation
-The code is thoroughly documented with inline comments and detailed docstrings for each function. For example:
+## Visualizations
 
-- **`get_whois_info(domain: str) -> Dict[str, Any]`:* 
-  Retrieves WHOIS information for the specified domain, caches results to reduce redundant lookups, and includes error handling with retry logic.
+The **Subdomain Finder** tab offers interactive charts for quick insights:
 
-- **`check_http_domain(...) -> Tuple[Any, ...]`:**  
-  Handles HTTP requests with support for both HTTPS and HTTP protocols, retries on failure, and gathers details like status code, response snippet, and redirection history.
+- **Pie Chart**: Illustrates the distribution of subdomain statuses (Online, Flagged/Unreachable, Offline).
+- **Bar Chart**: Displays response times for online subdomains.
 
-- **`get_dns_record_for_domain(...) -> Tuple[str, Dict[str, Union[List[str], str]]]`:**  
-  Performs DNS record lookups for a domain using specified record types and manages exceptions such as timeouts or NXDOMAIN errors.
+These visualizations, powered by Plotly, are accessible under a "Graphs" expander in the tab.
 
-- **`get_certificate_info(domain: str) -> Tuple[Optional[str], Optional[int], str]`:**  
-  Connects to the domain using an SSL context, retrieves the certificate, and calculates how many days remain until the certificate expires.
+---
 
-- **`process_all_in_one(...) -> Dict[str, Any]`:**  
-  Aggregates results from HTTP, DNS, WHOIS, certificate, and wildcard DNS checks into a single dictionary for advanced reporting.
+## Technical Details
 
-Each function is designed to be modular, making the code easy to maintain, extend, and understand.
+- **Asynchronous Programming**: Utilizes `asyncio` and `aiohttp` for concurrent, non-blocking HTTP and DNS operations, optimizing performance for multiple domains.
+- **Error Handling**: Implements try-except blocks and fallbacks (e.g., WHOIS when RDAP fails) for reliability.
+- **Modular Design**: Organized into functions per check type for maintainability and scalability.
+- **Type Hints**: Includes type annotations for improved code clarity.
+- **External Dependencies**: Relies on services like crt.sh (subdomains) and RDAP/WHOIS (registration data), subject to external constraints.
 
-## Contributing
-Contributions, suggestions, and bug reports are welcome! To contribute:
-1. Fork the repository.
-2. Create a new feature branch.
-3. Commit your changes with clear messages.
-4. Open a pull request for review.
+---
 
+## Known Issues and Limitations
 
-
+- **External Service Reliance**: Dependent on third-party services (crt.sh, RDAP, WHOIS), which may impose rate limits or experience downtime.
+- **WHOIS Fallback**: Falls back to WHOIS if RDAP fails, potentially yielding inconsistent data formats.
+- **Certificate Checks**: Requires port 443 connectivity; domains without HTTPS or with misconfigured certificates may fail.
