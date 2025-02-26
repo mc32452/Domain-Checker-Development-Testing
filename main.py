@@ -753,6 +753,7 @@ with tabs[3]:
 with tabs[4]:
     st.header("Subdomain Finder")
     st.write("Extracts subdomains from crt.sh and checks them via HTTP with TCP fallback.")
+    st.caption("This tool relies on API calls to crt.sh, this is a free service which may have downtime or intermittent issues.")
     domain_input: str = st.text_input("Enter a naked domain (e.g. example.com):", help="No www or subdomains.")
     if st.button("Search") and domain_input:
         with st.spinner(text=f"Searching for subdomains of {domain_input}..."):
