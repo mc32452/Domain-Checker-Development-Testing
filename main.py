@@ -432,6 +432,25 @@ async def check_wildcard_dns(domain: str, record_type: str = "A") -> str:
         return "No"
 
 # ------------------------------
+# Geolocation Function using freeIPAPI
+# ------------------------------
+async def get_geolocation(ip: str, session: aiohttp.ClientSession) -> Dict[str, str]:
+    url = f"https://freeipapi.com/api/json/{ip}"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+            if response.status == 200:
+                data = await response.json()
+                return {
+                    "IP": ip,
+                    "Country": data.get("countryName", "N/A"),
+                    "City": data.get("cityName", "N/A"),
+                }
+            else:
+                return {"IP": ip, "Error": f"HTTP {response.status}"}
+    except Exception as e:
+        return {"IP": ip, "Error": str(e)}
+
+# ------------------------------
 # Comprehensive (All In One) Check Function
 # ------------------------------
 async def process_all_in_one(
@@ -442,6 +461,7 @@ async def process_all_in_one(
     whois_enabled: bool,
     cert_enabled: bool,
     wildcard_enabled: bool,
+    geolocate_enabled: bool,
     session: aiohttp.ClientSession,
     semaphore: asyncio.Semaphore
 ) -> Dict[str, Any]:
@@ -493,6 +513,30 @@ async def process_all_in_one(
         result["DNS Records"] = "\n".join(dns_lines)
         recursive_dns = await get_recursive_dns_summary(domain, dns_record_types)
         result["Recursive DNS Chain"] = recursive_dns
+
+        if geolocate_enabled:
+            ips = []
+            for rtype in ["A", "AAAA"]:
+                records = dns_records.get(rtype, [])
+                if isinstance(records, list):
+                    for record in records:
+                        if record and record != "No records found":
+                            ip = record.split()[0]  # Take the first part as IP
+                            ips.append(ip)
+            if ips:
+                geolocation_tasks = [get_geolocation(ip, session) for ip in ips]
+                geolocation_results = await asyncio.gather(*geolocation_tasks)
+                geolocation_str = "\n".join(
+                    [f"IP: {res['IP']} - Country: {res.get('Country', 'N/A')}, City: {res.get('City', 'N/A')}"
+                     for res in geolocation_results if "Error" not in res]
+                )
+                if geolocation_str:
+                    result["Geolocation"] = geolocation_str
+                else:
+                    result["Geolocation"] = "No geolocation data available"
+            else:
+                result["Geolocation"] = "No IP addresses found"
+
     if cert_enabled:
         cert_expiry_date, days_until_expiry, cert_error = await process_certificate_check(domain)
         result["Certificate Expiry Date"] = cert_expiry_date if cert_expiry_date else ""
@@ -511,13 +555,14 @@ async def run_all_in_one_checks(
     dns_record_types: List[str],
     whois_enabled: bool,
     cert_enabled: bool,
-    wildcard_enabled: bool
+    wildcard_enabled: bool,
+    geolocate_enabled: bool
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     semaphore = asyncio.Semaphore(concurrency)
     async with aiohttp.ClientSession() as session:
         tasks = [
-            process_all_in_one(domain, timeout, retries, dns_record_types, whois_enabled, cert_enabled, wildcard_enabled, session, semaphore)
+            process_all_in_one(domain, timeout, retries, dns_record_types, whois_enabled, cert_enabled, wildcard_enabled, geolocate_enabled, session, semaphore)
             for domain in domains
         ]
         total = len(tasks)
@@ -964,6 +1009,8 @@ with tabs[5]:
         wildcard_enabled: bool = st.checkbox("Check for Wildcard DNS", value=False)
         whois_enabled: bool = st.checkbox("Enable WHOIS Lookup", value=False)
         cert_enabled: bool = st.checkbox("Enable TLS/SSL Certificate Check", value=False)
+        geolocate_enabled: bool = st.checkbox("Enable IP Geolocation", value=False)
+        st.caption("Note: 60 requests per minute limit for IP Geolocation")
         st.markdown("### Select DNS Record Types")
         record_options_all: List[str] = ["A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT"]
         selected_dns_all: List[str] = []
@@ -991,10 +1038,12 @@ with tabs[5]:
                 enabled_checks += ", TLS/SSL Certificate Check"
             if wildcard_enabled:
                 enabled_checks += ", Wildcard DNS Check"
+            if geolocate_enabled:
+                enabled_checks += ", IP Geolocation"
             st.info(f"Starting All In One checks ({enabled_checks})...")
             start_time_all = time.time()
             all_results = asyncio.run(
-                run_all_in_one_checks(domains_all, timeout_all, concurrency_all, retries_all, selected_dns_all, whois_enabled, cert_enabled, wildcard_enabled)
+                run_all_in_one_checks(domains_all, timeout_all, concurrency_all, retries_all, selected_dns_all, whois_enabled, cert_enabled, wildcard_enabled, geolocate_enabled)
             )
             end_time_all = time.time()
             elapsed_all = end_time_all - start_time_all
@@ -1008,6 +1057,8 @@ with tabs[5]:
                 columns.extend(["Registrant", "Registrar", "WHOIS Creation Date", "WHOIS Expiration Date", "Last Updated", "Name Servers"])
             if wildcard_enabled:
                 columns.append("Wildcard DNS")
+            if geolocate_enabled:
+                columns.append("Geolocation")
             columns.extend(["HTTP Response Time (s)", "HTTP Attempts", "Response Received", "Redirected", "Redirect History", "HTTP Snippet"])
             if whois_enabled:
                 columns.append("WHOIS Error")
