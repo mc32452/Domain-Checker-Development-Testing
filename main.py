@@ -1038,7 +1038,7 @@ with tabs[4]:
 with tabs[5]:
     st.header("Advanced Check")
     st.markdown("Combine HTTP, DNS, WHOIS, and TLS/SSL lookups.")
-    st.info("If you have caching issues, CTRL/CMD + Shift + R to clear all domain cache.")
+    st.info("**Note:** If you have caching issues, CTRL/CMD + Shift + R to clear all domain cache.")
     with st.form("all_form"):
         domains_input_all: str = st.text_area("Enter one or more domains (one per line):", height=200, help="Example: example.com")
         wildcard_enabled: bool = st.checkbox("Check for Wildcard DNS", value=False)
