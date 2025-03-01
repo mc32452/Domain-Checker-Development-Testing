@@ -1154,9 +1154,9 @@ with tabs[5]:
                 st.write(f"**Total Domains Processed:** {len(http_times)}")
                 st.write(f"**Average HTTP Response Time:** {avg_time:.2f} seconds")
                 if fastest_domains:
-                    st.write(f"The fastest response was from {fastest_domains[0]} taking {min_time:.2f} seconds.")
+                    st.write(f"The **fastest** response was from {fastest_domains[0]} taking {min_time:.2f} seconds.")
                 if slowest_domains:
-                    st.write(f"The slowest response was from {slowest_domains[0]} taking {max_time:.2f} seconds.")
+                    st.write(f"The **slowest** response was from {slowest_domains[0]} taking {max_time:.2f} seconds.")
                 st.write(f"**Speed per Domain:** {speed:.2f} domains per second")
             else:
                 st.write("No HTTP response times available.")
