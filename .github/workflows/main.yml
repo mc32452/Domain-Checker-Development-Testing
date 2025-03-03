@@ -11,4 +11,4 @@ jobs:
     steps:
     - name: Ping Streamlit App
       run: |
-        curl https://domain-check-tools.streamlit.app/
+        curl https://domainchecker-development-testing.streamlit.app/
