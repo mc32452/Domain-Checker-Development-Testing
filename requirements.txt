@@ -5,3 +5,4 @@ dnspython
 aiohttp
 crtsh
 plotly
+streamlit
